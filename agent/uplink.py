@@ -4,10 +4,9 @@ import json
 import urllib.error
 
 import anonymize
-import sealbox
 from net import UA, http
 
-VERSION = "1.0.0"
+VERSION = "1.1.1"
 USER_AGENT = "%s patchfirst/%s" % (UA, VERSION)
 
 
@@ -44,14 +43,9 @@ class Link:
         return "/v1/fleets/%s%s" % (self.fleet, tail)
 
 
-def upload(link, host_uuid, host_name, inv, secret, words, view_key, *, projects=None, payload=None):
-    """→ (anonymized summary, server names). Paths and programs are never sealed."""
+def upload(link, host_uuid, inv, secret, words, *, projects=None, payload=None):
+    """→ anonymized summary. The server name never leaves: the service knows the server only by its UUID."""
     if payload is None:
         an = anonymize.Anonymizer(secret, words, projects=projects)
         payload = an.payload(inv)
-    summary = link.call("PUT", link.fleet_path("/hosts/%s" % host_uuid), payload)
-    labels = {host_uuid: host_name}
-    if view_key and sealbox.available():
-        box = sealbox.seal(view_key, link.fleet, host_uuid, labels)
-        link.call("PUT", link.fleet_path("/hosts/%s/labels" % host_uuid), {"sealed": box})
-    return summary, labels
+    return link.call("PUT", link.fleet_path("/hosts/%s" % host_uuid), payload)

@@ -4,6 +4,7 @@ import pkgutil
 import re
 
 import catalog
+import version_text
 
 COLLECTION_FAILED = "сбор не удался"
 
@@ -62,12 +63,6 @@ def owned_key(key, package):
     return valid_package(package) and (is_label(key, "path") or owner_path(key, package))
 
 
-def owned_paths(owners, label):
-    """Path to what leaves the owner: the distribution path itself or an opaque label."""
-    return {path: path if is_label(path, "path") or owner_path(path, package) else label(path)
-            for path, package in owners.items()}
-
-
 def program_name(value, owned=None):
     """A catalogue identity or an existing opaque owner label; no free names."""
     if not isinstance(value, str):
@@ -84,6 +79,61 @@ def program_name(value, owned=None):
     return next((canonical for pattern, canonical in aliases if re.fullmatch(pattern, value)), "")
 
 
+_KERNEL = re.compile(r"(\d+\.\d+(?:\.\d+)?)((?:[-.+_~][0-9A-Za-z]+)*)", re.A)
+# Words vendors, distributions and clouds put into versions; anything else may name the owner (1.2.3-acme).
+_BUILD_WORDS = {
+    "generic", "amd64", "arm64", "armhf", "armel", "i386", "i686", "x86", "aarch64", "noarch", "cloud", "rt", "aws",
+    "azure", "gcp", "gke", "kvm", "lowlatency", "oracle", "ibm", "raspi", "rpi", "nvidia", "lts", "virt", "pve", "hwe",
+    "oem", "edge", "microsoft", "standard", "wsl", "uek", "default", "pae", "lpae", "mainline", "fips", "arch", "deb",
+    "bpo", "ubuntu", "debian", "dfsg", "build", "git", "really", "nmu", "amzn", "module", "alpine", "alpha", "beta",
+    "pre", "post", "dev", "esm", "stable", "focal", "jammy", "noble", "bionic", "xenial", "bookworm", "bullseye",
+    "buster", "trixie", "stretch", "slim", "fpm", "apache", "cli", "management", "community", "enterprise", "legacy",
+    "final", "release", "snapshot", "nightly", "static", "musl", "glibc", "jdk", "jre", "openjdk", "temurin", "zulu",
+    "corretto", "ubi", "rootless", "perl", "otel", "hotfix", "patch", "update", "pgdg", "sles", "mga", "ph", "lp",
+    "ol", "el", "fc", "bin", "linux", "windows", "darwin", "go", "php", "node", "python", "mysql", "mariadb", "redis",
+    "nginx", "busybox", "distroless", "nonroot", "full", "lite", "minimal", "core", "server", "client", "common",
+    "rocky", "alma", "centos", "rhel", "fedora", "opensuse", "suse", "zabbix", "grafana", "docker", "ce", "ee"}
+_SHORT_WORDS = {"rc", "el", "fc", "ce", "ee", "lp", "ol", "ph", "rt", "ga", "ea", "sp", "pl"}
+_DOTTED_QUAD = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")
+
+
+def _internal_address(value):
+    import ipaddress
+    for quad in _DOTTED_QUAD.findall(value):
+        try:
+            address = ipaddress.ip_address(quad)
+        except ValueError:
+            continue
+        if not address.is_global:
+            return True
+    return False
+
+
+def _build_token(token):
+    letters = re.sub(r"\d+", "", token)
+    return (token in _BUILD_WORDS or letters in _BUILD_WORDS or len(letters) == 1 or letters in _SHORT_WORDS
+            or bool(re.fullmatch(r"(?:deb|bpo|ubuntu|el|fc|amzn|ol)\d+(?:u\d+)?(?:_\d+)?", token)))
+
+
+def public_version(value):
+    """A version as vendors publish it; an owner word or an internal address leaves only the upstream release."""
+    if not isinstance(value, str) or not value:
+        return ""
+    tokens = {token.lower() for token in re.split(r"[^0-9A-Za-z]+", value) if re.search(r"[A-Za-z]", token)}
+    if all(_build_token(token) for token in tokens) and not _internal_address(value):
+        return value
+    release = re.sub(r"(\d)[A-Za-z]{2,}\d*$", r"\1", version_text.extract(re.sub(r"^\d+:", "", value)))
+    return "" if _internal_address(release) else release
+
+
+def kernel_version(value):
+    """The kernel release as a distribution builds it; an unknown suffix leaves only the upstream version."""
+    match = _KERNEL.fullmatch(value or "")
+    if not match:
+        return ""
+    return value if public_version(value) == value else match[1]
+
+
 def binary_version(value):
     """Only a parsed release token leaves the owner; raw tool output stays local.
 
@@ -96,9 +146,9 @@ def binary_version(value):
     line = value.split("\n", 1)[0].strip()
     if line.startswith("/"):
         line = line.partition(" ")[2]
-    match = _VERSION_TOKEN.search(line)
-    if match:
-        return match.group(0)
+    for match in _VERSION_TOKEN.finditer(line):
+        if not _internal_address(match.group(0)):
+            return public_version(match.group(0))
     if re.fullmatch(r"v?\d+", line):
         return line
     match = _BINARY_PREFIX.match(line)
@@ -161,7 +211,7 @@ def os_metadata(value):
     ident = value.get("id", "")
     ident = ident if ident in OS_NAMES else ""
     version = value.get("version_id", "")
-    version = version if valid_version(version) else ""
+    version = version if re.fullmatch(r"\d+(?:\.\d+)*", version) else ""
     codename = value.get("codename", "")
     codename = codename if codename in OS_CODENAMES else ""
     pretty = value.get("pretty", "")
@@ -214,7 +264,7 @@ INVENTORY_SCHEMA = {
     "apps": [{key: str for key in ("kind", "path", "version")}],
     "composer": [{**{key: str for key in ("lock", "name", "version")}, "dev": bool}],
     "deps": [{"eco": str, "lock": str, "name": str, "version": str, "dev": bool}],
-    "apache_php": [str], "error": str,
+    "apache_php": [str], "error": str, "unlisted_packages": int,
     "images": [{"namespace": str, "image": str, "image_id": str, "workloads": [str], "public": bool}],
     "nodes": [{key: str for key in ("name", "osImage", "kernelVersion", "kubeletVersion", "containerRuntimeVersion")}],
     **{prefix + flag: bool for prefix in ("deps_scan_", "composer_scan_")
@@ -304,6 +354,7 @@ def valid_leaf(path, value, owned=None):
 
 LIMIT = 256
 HEADLINE_LIMIT = 80
+MAX_COUNT = 1000000
 
 
 def clean(value, schema=INVENTORY_SCHEMA, path=(), owned=None, program=None):
@@ -327,6 +378,8 @@ def clean(value, schema=INVENTORY_SCHEMA, path=(), owned=None, program=None):
         return None
     if schema is bool:
         return bool(value)
+    if schema is int:
+        return value if type(value) is int and 0 <= value <= MAX_COUNT else 0
     if isinstance(schema, list):
         return [clean(item, schema[0], path + ("*",), owned, program) for item in value] \
             if isinstance(value, list) else []

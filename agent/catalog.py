@@ -75,6 +75,24 @@ def by_image(image):
     return None, "", tag
 
 
+# Every word of a kept package name must come from the catalogue or be a common package variant.
+PACKAGE_WORDS = {word for p in CATALOG for rx in p.get("packages", []) for word in re.findall(r"[a-z]+", rx)} | {
+    "server", "client", "common", "core", "static", "cli", "fpm", "jre", "jdk", "headless", "agent", "frontend",
+    "mysql", "pgsql", "sqlite", "php", "community", "enterprise", "io", "ce", "libs", "lib", "ssl", "plugins", "libssl"}
+
+
+def known_words(name):
+    return all(token.isdigit() or re.sub(r"\d+", "", token) in PACKAGE_WORDS for token in re.split(r"[-._]", name))
+
+
+def by_package(name):
+    """The whole name is a catalogue package plus a version; no word the catalogue does not know."""
+    if not known_words(name):
+        return None
+    return next((p for p in CATALOG for rx in p.get("packages", [])
+                 if re.fullmatch(r"(?:%s)(?:[-.]?\d[\d.]*)?" % rx.strip("^$"), name)), None)
+
+
 def catalogue_names(name):
     """Repository suffixes the catalogue matches entirely, shortest first: no arbitrary prefix segments."""
     segments = name.split("/")

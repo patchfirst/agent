@@ -12,6 +12,7 @@ import sys
 
 import dependency_locks
 import catalog
+import services
 from net import is_public_addr
 
 
@@ -92,6 +93,20 @@ def sections(text):
     return out
 
 
+DISTRO_MAINTAINER = re.compile(r"@(?:(?:lists|packages|tracker)\.)?(?:debian\.org|ubuntu\.com|canonical\.com)>|"
+                               r"@(?:lists\.alioth\.debian\.org|alioth-lists\.debian\.net)>")
+
+
+KERNEL_ABI = re.compile(r"linux-(?:image|headers|modules(?:-extra)?|tools|cloud-tools|buildinfo|objects|signatures|kbuild)"
+                        r"(?:-unsigned)?-(\d.*)")
+
+
+def kernel_abi(name):
+    """A distro kernel package: the name ends in a kernel release a distribution builds, nothing else."""
+    match = KERNEL_ABI.fullmatch(name)
+    return bool(match) and services.kernel_version(match[1]) == match[1]
+
+
 def tsv(lines, width):
     return [(line.split("\t") + [""] * width)[:width] for line in lines]
 
@@ -133,8 +148,8 @@ def listen_services(lines):
 
 def packages(sec):
     if sec.get("dpkg"):
-        items = [{"name": n, "version": v, "source": s or n, "source_version": sv or v}
-                 for n, v, s, sv in tsv(sec["dpkg"], 4)]
+        items = [{"name": n, "version": v, "source": s or n, "source_version": sv or v, "_maintainer": m}
+                 for n, v, s, sv, m in tsv(sec["dpkg"], 5)]
         return "dpkg", items
     if sec.get("rpm"):
         oid = os_release(sec.get("os", [])).get("id")
@@ -147,7 +162,7 @@ def packages(sec):
             if label and label != "(none)":
                 p["modularitylabel"] = label
             vendor = vendor.strip()
-            p["origin"] = "unknown"
+            p["origin"] = "local"
             if any(re.fullmatch(pattern, vendor, re.I) for pattern in native):
                 p["origin"] = "distro"
             elif any(re.fullmatch(pattern, vendor, re.I) for pattern in origins["third_party_vendors"]):
@@ -172,10 +187,14 @@ def packages(sec):
 def parse(text):
     sec = sections(text)
     manager, items = packages(sec)
-    origins = dict(tsv(sec.get("package_origins", []), 2))
+    origins = {name: origin for name, origin, _ in tsv(sec.get("package_origins", []), 3)}
     for p in items:
-        if origins.get(p["name"]) in ("distro", "third_party", "unknown"):
+        if origins.get(p["name"]) in ("distro", "third_party", "unknown", "local"):
             p["origin"] = origins[p["name"]]
+        # Superseded distro builds (an old kernel ABI) vanish from the mirror but keep the distro maintainer.
+        if p.get("origin") == "local" and kernel_abi(p["name"]) and DISTRO_MAINTAINER.search(p.get("_maintainer", "")):
+            p["origin"] = "unknown"
+        p.pop("_maintainer", None)
     reboot = sec.get("reboot", [])
     docker = None
     if sec.get("docker"):
@@ -184,10 +203,13 @@ def parse(text):
             "images": [dict(zip(("id", "tags", "digests", "created"), row)) for row in tsv(sec.get("images", []), 4)],
         }
     apps, composer = [], []
-    for row in tsv(sec.get("apps", []) + sec.get("composer", []), 5):
+    rows = tsv(sec.get("apps", []) + sec.get("composer", []), 5)
+    packagist = {(row[1], row[2]) for row in rows if row[0] == "composer_public"}
+    for row in rows:
         if row[0] == "composer":
-            composer.append({"lock": row[1], "name": row[2], "version": row[3], "dev": row[4] == "1"})
-        else:
+            composer.append({"lock": row[1], "name": row[2], "version": row[3], "dev": row[4] == "1",
+                             "public": (row[1], row[2]) in packagist})
+        elif row[0] != "composer_public":
             apps.append({"kind": row[0], "path": row[1], "version": row[2]})
     procpkg = {}
     for line in sec.get("procpkg", []):

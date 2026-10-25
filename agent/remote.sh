@@ -16,7 +16,8 @@ rpm_packages() {
 
 apt_origin_parse() {
   # The first input maps repository indexes to their signed Release origin.
-  # Only the three public enum values leave the machine.
+  # Output: name and class. "local": no configured repository knows the name
+  # (an outdated distro version still lists its newer versions).
   awk '
     FNR==NR {
       if ($2 ~ /^(https?|file):/) index_key=$2 " " $3
@@ -27,9 +28,10 @@ apt_origin_parse() {
       next
     }
     function emit() {
-      if (name!="") print name "\t" (distro && !third ? "distro" : third && !distro ? "third_party" : "unknown")
+      if (name!="") print name "\t" (!known ? "local" : distro && !third ? "distro" : third && !distro ? "third_party" : "unknown")
     }
-    /^[^[:space:]].*:$/ {emit(); name=$0; sub(/:$/, "", name); distro=third=active=0; next}
+    /^[^[:space:]].*:$/ {emit(); name=$0; sub(/:$/, "", name); distro=third=active=known=0; next}
+    $2 ~ /^(https?|file):/ {known=1}
     $1=="***" {active=1; next}
     $2 ~ /^[0-9]+$/ && $1!="***" {active=0}
     active && $2 ~ /^(https?|file):/ {
@@ -92,10 +94,49 @@ composer_paths() {
 composer_read() {
   head -n 100 | while IFS= read -r f; do
     [ -f "$f" ] || continue
-    grep -Eo '"(packages|packages-dev)"[[:space:]]*:|"(name|version)"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" |
-      sed 's/"\([a-z]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/' |
-      awk -v f="$f" '/^"packages"/{dev=0; n=""; next} /^"packages-dev"/{dev=1; n=""; next}
-        $1=="name"{n=$2; next} $1=="version" && n!=""{print "composer\t" f "\t" n "\t" $2 "\t" (dev ? "1" : "0")} {n=""}'
+    # Walk the JSON: packages are the objects of the "packages"/"packages-dev" arrays.
+    # Packagist marks its packages with its download notification URL; anything else is a private repository.
+    awk -v f="$f" '
+      function flush() {
+        if (name != "" && version != "") {
+          print "composer\t" f "\t" name "\t" version "\t" dev
+          if (url == "https://packagist.org/downloads/") print "composer_public\t" f "\t" name "\t-\t-"
+        }
+        name = version = url = ""
+      }
+      function scalar(value) {
+        if (depth == 3 && section != "") {
+          if (key[3] == "name") name = value
+          else if (key[3] == "version") version = value
+          else if (key[3] == "notification-url") url = value
+        }
+      }
+      {
+        n = length($0)
+        for (i = 1; i <= n; i++) {
+          c = substr($0, i, 1)
+          if (instring) {
+            if (escaped) { escaped = 0; text = text c; continue }
+            if (c == "\\") { escaped = 1; continue }
+            if (c != "\"") { text = text c; continue }
+            instring = 0
+            if (expectkey) key[depth] = text; else scalar(text)
+            continue
+          }
+          if (c == "\"") { instring = 1; text = ""; continue }
+          if (c == "{") { kind[++depth] = "o"; expectkey = 1; key[depth] = ""; if (depth == 3 && section != "") flush(); continue }
+          if (c == "[") {
+            kind[++depth] = "a"; expectkey = 0
+            if (depth == 2 && key[1] == "packages") { section = "p"; dev = 0 }
+            if (depth == 2 && key[1] == "packages-dev") { section = "d"; dev = 1 }
+            continue
+          }
+          if (c == "}") { if (depth == 3 && section != "") flush(); depth--; expectkey = 0; continue }
+          if (c == "]") { if (depth == 2) section = ""; depth--; expectkey = 0; continue }
+          if (c == ",") { expectkey = (kind[depth] == "o"); continue }
+          if (c == ":") { expectkey = 0; continue }
+        }
+      }' "$f"
   done
 }
 
@@ -380,7 +421,7 @@ sec reboot
 [ -f /var/run/reboot-required ] && echo required && cat /var/run/reboot-required.pkgs 2>/dev/null
 
 sec dpkg
-has dpkg-query && dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\t${source:Package}\t${source:Version}\n' 2>/dev/null | awk -F'\t' '$1 ~ /^ii/ {print $2"\t"$3"\t"$4"\t"$5}'
+has dpkg-query && dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\t${source:Package}\t${source:Version}\t${Maintainer}\n' 2>/dev/null | awk -F'\t' '$1 ~ /^ii/ {print $2"\t"$3"\t"$4"\t"$5"\t"$6}'
 
 sec rpm
 rpm_packages

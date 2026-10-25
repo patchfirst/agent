@@ -33,6 +33,7 @@ class Anonymizer:
         self.words = [w.lower() for w in identity_words if w]
         self.labels = {}
         self.projects = projects if projects is not None else {}
+        self.hidden_labels = set()
         self.safe_displays = safe_displays
         self.display_kinds = {}
 
@@ -63,14 +64,24 @@ class Anonymizer:
         registry = first if "/" in name and ("." in first or ":" in first) else "docker.io"
         prefix = "" if catalog.public_registry(registry) else self.label("reg", registry) + "/"
         normalized = catalog.catalogue_image(name, prefix)
+        tag = catalog.split_image(normalized)[1]
+        # A tag with owner words or stray numbers (a port) is not a vendor tag: the whole image becomes a label.
+        if tag and services.public_version(tag) != tag:
+            return self.label("img", image)
         return normalized if services.image_reference(normalized) else self.label("img", image)
 
     def package(self, p):
         out = {k: p[k] for k in ("name", "version", "source", "source_version")}
-        if p.get("origin") in ("distro", "third_party", "unknown"):
-            out["origin"] = p["origin"]
+        if p.get("origin") in ("distro", "third_party", "unknown", "local"):
+            out["origin"] = "unknown" if p["origin"] == "local" else p["origin"]
+        if p.get("origin") in ("local", "third_party"):
+            # Kept for the catalogue only: the vendor's words survive, the owner's do not.
+            out.update(source=p["source"] if catalog.by_package(p["source"]) else p["name"],
+                       version=services.public_version(p["version"]),
+                       source_version=services.public_version(p["source_version"]))
         label = p.get("modularitylabel", "")
-        if re.fullmatch(r"[a-zA-Z0-9_.+-]+(?::[a-zA-Z0-9_.+-]+){3}", label) and not self.marked(label):
+        if p.get("origin") == "distro" and re.fullmatch(r"[a-zA-Z0-9_.+-]+(?::[a-zA-Z0-9_.+-]+){3}", label) \
+                and not self.marked(label):
             out["modularitylabel"] = label
         if self.marked(p["name"]) or self.marked(p["source"]):
             out.update(name=self.label("pkg", p["name"]), source=self.label("pkg", p["source"]))
@@ -84,7 +95,7 @@ class Anonymizer:
     def displays(self):
         result = []
         for label, path in self.labels.items():
-            if not (services.is_label(label, 'path') or services.is_label(label, 'lock')):
+            if not (services.is_label(label, 'path') or services.is_label(label, 'lock')) or label in self.hidden_labels:
                 continue
             folder = posixpath.dirname(path) or path
             if folder not in self.projects:
@@ -102,44 +113,64 @@ class Anonymizer:
             package["eco"] == "npm" and name.startswith("@") and
             name.split("/", 1)[0] not in self.public_scopes())
         out = {"eco": package["eco"], "lock": self.location("lock", package["lock"], "npm" if package["eco"] == "npm" else "python"),
-               "name": self.label("pkg", name) if private else name, "version": package["version"]}
+               "name": self.label("pkg", name) if private else name,
+               "version": services.public_version(package["version"])}
         if "dev" in package:
             out["dev"] = bool(package["dev"])
         return out
 
+    def unlisted(self, p):
+        """Outside the distribution and the catalogue: nothing checks it, and the name may name the owner.
+
+        A binary of a catalogue source stays only if every word of its name is known: plugins and extras
+        (docker-buildx-plugin from docker-ce) carry their own versions and must not pose as the product.
+        """
+        return p.get("origin") in ("local", "third_party") and not (
+            catalog.by_package(p["name"]) or (catalog.by_package(p["source"]) and catalog.known_words(p["name"])))
+
+    def composer(self, c):
+        public = c.get("public") and not self.marked(c["name"]) and re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", c["name"], re.I)
+        return {"lock": self.location("lock", c["lock"], "composer"),
+                "name": c["name"].lower() if public else self.label("pkg", c["name"]),
+                "version": services.public_version(c["version"]), "dev": bool(c.get("dev"))}
+
     def host(self, inv):
         if self.marked(inv.get("os", {}).get("pretty", "")):
             raise Leak("OS description still contains an owner identity word; refusing to send")
+        packages = [p for p in inv.get("packages", []) if not self.unlisted(p)]
+        sent_packages = [self.package(p) for p in packages]
+        renamed = {p["name"]: sent["name"] for p, sent in zip(packages, sent_packages)}
+        names = set(renamed)
         listeners = services.records(inv, normalize_program=self.program)
         programs = {p.get("program", "") for p in inv.get("services", inv.get("ports", [])) if isinstance(p, dict)}
         raw = {path: pkg for path, pkg in inv.get("process_packages", {}).items()
-               if services.system_path(path) and services.valid_package(pkg) and not self.marked(path) and not self.marked(pkg)}
-        sent = services.owned_paths(raw, lambda path: self.label("path", path))
+               if pkg in names and services.valid_package(pkg) and not self.marked(pkg)}
+        sent = {path: self.label("path", path) for path in raw}
+        self.hidden_labels.update(sent.values())
         out = {
             "kind": "host",
             "os": services.os_metadata(inv.get("os", {})),
-            "kernel": inv.get("kernel", ""),
+            "kernel": services.kernel_version(inv.get("kernel", "")),
             "reboot_required": bool(inv.get("reboot_required")),
-            "reboot_packages": [p for p in inv.get("reboot_packages", []) if not self.marked(p)],
+            "reboot_packages": [renamed[p] for p in inv.get("reboot_packages", []) if p in names and not self.marked(p)],
             "package_manager": inv.get("package_manager", ""),
-            "packages": [self.package(p) for p in inv.get("packages", [])],
+            "packages": sent_packages,
+            "unlisted_packages": len(inv.get("packages", [])) - len(packages),
             "public_addr": is_public_addr(inv.get("addr", "")),
             "tags": [t for t in inv.get("tags", []) if t in ALLOWED_TAGS],
             "services": listeners,
-            "process_packages": {sent[path]: pkg for path, pkg in raw.items()},
+            "process_packages": {sent[path]: renamed[pkg] for path, pkg in raw.items()},
             "processes": [[self.program(comm), sent.get(exe, "")]
                           for comm, exe in inv.get("processes", []) if comm in programs or exe in raw],
-            "binaries": [{"name": self.program(b["name"]), "path": self.label("path", b["path"]), "owner": b.get("owner", "-"),
+            "binaries": [{"name": self.program(b["name"]), "path": self.label("path", b["path"]),
+                          "owner": renamed.get(b.get("owner", "-"), "-" if b.get("owner", "-") == "-" else self.label("pkg", b["owner"])),
                           "version": services.binary_version(b.get("version", ""))} for b in inv.get("binaries", [])],
             "containers_health": [{"image": self.image(c["image"])} for c in inv.get("containers_health", [])],
             "docker": {"containers": [{"image": self.image(c["image"])}
                                       for c in inv["docker"].get("containers", [])]} if inv.get("docker") else None,
-            "apps": [{"kind": a["kind"] if a["kind"] in services.APP_NAMES else self.label("path", a["kind"]), "path": self.label("path", a["path"]), "version": a.get("version", "")}
+            "apps": [{"kind": a["kind"] if a["kind"] in services.APP_NAMES else self.label("path", a["kind"]), "path": self.label("path", a["path"]), "version": services.public_version(a.get("version", ""))}
                      for a in inv.get("apps", [])],
-            "composer": [{"lock": self.location("lock", c["lock"], "composer"),
-                          "name": self.label("pkg", c["name"]) if self.marked(c["name"]) or
-                          not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", c["name"], re.I) else c["name"].lower(),
-                          "version": c["version"], "dev": bool(c.get("dev"))} for c in inv.get("composer", [])],
+            "composer": [self.composer(c) for c in inv.get("composer", [])],
             "deps": [self.dependency(p) for p in inv.get("deps", [])],
             "deps_scan_limited": bool(inv.get("deps_scan_limited")),
             "deps_scan_timeout": bool(inv.get("deps_scan_timeout")),
@@ -181,8 +212,8 @@ class Anonymizer:
                         raise Leak("anonymized JSON still contains a port key; refusing to send")
                     if key not in schema and "*" not in schema:
                         raise Leak("unknown anonymized JSON field; refusing to send")
-                    if "*" in schema and not services.owned_key(key, item):
-                        raise Leak("unknown process path; refusing to send")
+                    if "*" in schema and not (services.is_label(key, "path") and services.owned_key(key, item)):
+                        raise Leak("process path is not a label; refusing to send")
                     check(item, schema.get(key, schema.get("*")), path + ("*" if "*" in schema else key,))
             elif isinstance(schema, (list, tuple)):
                 if not isinstance(value, (list, tuple)) or isinstance(schema, tuple) and len(value) != len(schema):
@@ -193,6 +224,9 @@ class Anonymizer:
             elif schema is bool:
                 if type(value) is not bool:
                     raise Leak("invalid anonymized JSON flag")
+            elif schema is int:
+                if type(value) is not int or not 0 <= value <= services.MAX_COUNT:
+                    raise Leak("invalid anonymized JSON count")
             elif schema is str and not services.valid_leaf(path, value, owned):
                 raise Leak("invalid anonymized JSON value; refusing to send")
 

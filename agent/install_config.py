@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 
 # Same as uplink.USER_AGENT: the installer runs separately from the agent package.
-UA = 'psr/1.0 (+security inventory) patchfirst/1.0.0'
+UA = 'psr/1.0 (+security inventory) patchfirst/1.1.1'
 
 
 def canonical_config(config):

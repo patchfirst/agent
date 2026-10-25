@@ -4,11 +4,11 @@
   python3 patchfirst.pyz check --api https://example.com [--json]  free check
   python3 patchfirst.pyz dry-run [--config …]                 show what would be sent (sends nothing)
   python3 patchfirst.pyz where [PROJECT] [--config …]       local project path or list
+  python3 patchfirst.pyz id [--config …]                    this server's ID in the dashboard
   patchfirst check --ssh user@host --ssh-opt Port=2222 --json  collect over SSH, anonymize locally
 
-The fleet owner provides the config (0600): api, fleet, token (write), secret (labels), view_key (name dictionary),
-identity_words, host, host_uuid[, ca]. Addresses and names are not sent to the service: it sees UUIDs and versions.
-Without python3-cryptography, data is sent but the name dictionary is not (the dashboard shows UUIDs).
+The fleet owner provides the config (0600): api, fleet, token (write), secret (labels), identity_words, host,
+host_uuid[, ca]. Addresses and server names are not sent to the service: it sees the server's UUID and versions.
 Cron: 17 */6 * * * python3 /opt/patchfirst/patchfirst.pyz run >/dev/null
 """
 import argparse
@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -30,7 +31,6 @@ import npm_scopes
 import catalog
 import project_registry
 from project_registry import project_state_path, load_projects, save_projects
-import sealbox
 import uplink
 
 DEFAULT_CONFIG = "/etc/patchfirst.json"
@@ -154,18 +154,12 @@ def check_call(api, method, path, body=None, key=None, cafile=None, timeout=30):
 
 
 def check_payload(target=None, ssh_options=()):
-    """Ephemeral server name by UUID; AAD psr-labels/check/host preserves the link format."""
+    """One-off inventory with a throwaway label secret; the server name stays here."""
     host = target.rsplit("@", 1)[-1] if target else socket.gethostname()
-    cfg = {"host": host, "host_uuid": str(uuid.uuid4()), "secret": sealbox.new_key()}
+    cfg = {"host": host, "host_uuid": str(uuid.uuid4()), "secret": secrets.token_urlsafe(32)}
     inv = gather(cfg, target, ssh_options) if target else gather(cfg)
     an = anonymize.Anonymizer(cfg["secret"], host_markers(host, inv))
-    body = {"inventory": an.payload(inv)}
-    view_key = None
-    if sealbox.available():
-        view_key = sealbox.new_key()
-        labels = {cfg["host_uuid"]: host}
-        body["labels"] = sealbox.seal(view_key, "check", "host", labels)
-    return body, view_key
+    return {"inventory": an.payload(inv)}
 
 
 def print_check_summary(summary):
@@ -178,11 +172,9 @@ def print_check_summary(summary):
 def check(args):
     configure_public_scopes(args.api, args.ca)
     target = getattr(args, "ssh", None)
-    body, view_key = check_payload(target, getattr(args, "ssh_opt", ())) if target else check_payload()
+    body = check_payload(target, getattr(args, "ssh_opt", ())) if target else check_payload()
     if args.json:
         print(json.dumps(body, ensure_ascii=False, indent=1))
-        if view_key:
-            print("patchfirst: name key (save locally): %s" % view_key, file=sys.stderr)
         return 0
     reply = check_call(args.api, "POST", "/v1/check", body, cafile=args.ca)
     try:
@@ -191,7 +183,7 @@ def check(args):
             raise ValueError()
     except (KeyError, ValueError):
         raise uplink.ApiError("check service returned an invalid response")
-    url = "%s/check/#%s.%s%s" % (args.api.rstrip("/"), report_id, key, "." + view_key if view_key else "")
+    url = "%s/check/#%s.%s" % (args.api.rstrip("/"), report_id, key)
     deadline = time.monotonic() + CHECK_TIMEOUT
     try:
         while True:
@@ -233,7 +225,7 @@ def main():
         return prepare(sys.argv[2:])
     ap = argparse.ArgumentParser(prog="patchfirst", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version="patchfirst " + uplink.VERSION)
-    ap.add_argument("cmd", choices=("run", "dry-run", "check", "where", "uninstall"))
+    ap.add_argument("cmd", choices=("run", "dry-run", "check", "where", "id", "uninstall"))
     ap.add_argument("project", nargs="?", help="project number for the local where command; omit to list projects")
     if os.geteuid() == 0:
         config_paths = (DEFAULT_CONFIG, '/etc/psr-agent.json')
@@ -281,6 +273,11 @@ def main():
             return 0
         if args.cmd == "check":
             return check(args)
+        if args.cmd == "id":
+            from install_config import runtime_config
+            with runtime_config(args.config) as active_config, open(active_config) as f:
+                print(json.load(f)["host_uuid"])
+            return 0
         from install_config import runtime_config, reject_legacy_schedule
         with runtime_config(args.config) as active_config:
             if args.cmd == 'run':
@@ -295,8 +292,8 @@ def main():
             return 0
         reject_legacy_schedule(active_config)
         link = uplink.Link(cfg["api"], cfg["fleet"], cfg["token"], cfg.get("ca"))
-        summary, _ = uplink.upload(link, cfg["host_uuid"], cfg["host"], inv, cfg["secret"],
-                                   cfg.get("identity_words", []), cfg.get("view_key"), projects=projects)
+        summary = uplink.upload(link, cfg["host_uuid"], inv, cfg["secret"], cfg.get("identity_words", []),
+                                projects=projects)
     except (uplink.ApiError, anonymize.Leak, OSError, ValueError) as e:
         if isinstance(e, uplink.ApiError) and e.status == 402:
             print("patchfirst: server quota exhausted or payment required; open the dashboard", file=sys.stderr)
@@ -304,9 +301,8 @@ def main():
         print("patchfirst: %s" % e, file=sys.stderr)
         return 1
     c = summary["counts"]
-    print("patchfirst: %s %d/100 (%s) · P0 %d · P1 %d · P2 %d%s" % (
-        cfg["host"], summary["score"], summary["grade"], c["P0"], c["P1"], c["P2"],
-        "" if sealbox.available() else " · name dictionary not sent: python3-cryptography is missing"))
+    print("patchfirst: %s %d/100 (%s) · P0 %d · P1 %d · P2 %d" % (
+        cfg["host"], summary["score"], summary["grade"], c["P0"], c["P1"], c["P2"]))
     return 0
 
 
