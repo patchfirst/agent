@@ -1,0 +1,445 @@
+{
+ "public_image_registries": [
+  "docker.io",
+  "ghcr.io",
+  "quay.io",
+  "registry.k8s.io",
+  "k8s.gcr.io",
+  "gcr.io",
+  "mcr.microsoft.com",
+  "public.ecr.aws",
+  "docker.elastic.co",
+  "mirror.gcr.io",
+  "dockerhub.timeweb.cloud",
+  "nvcr.io",
+  "registry.gitlab.com",
+  "lscr.io",
+  "cgr.dev",
+  "registry.redhat.io",
+  "registry.access.redhat.com",
+  "index.docker.io",
+  "registry-1.docker.io"
+ ],
+ "private_image_registries": [
+  "cr.selcloud.ru",
+  "cr.yandex",
+  "registry.digitalocean.com"
+ ],
+ "rpm_origins": {
+  "distro_groups": [
+   {
+    "os": [
+     "centos",
+     "rocky",
+     "almalinux",
+     "rhel",
+     "ol"
+    ],
+    "vendors": [
+     "CentOS(?: Linux)?",
+     "Rocky(?: Linux| Enterprise Software Foundation)?",
+     "AlmaLinux(?: OS Foundation)?",
+     "Red Hat(?:,? Inc\\.?)?",
+     "Oracle(?: Linux| America(?:,? Inc\\.?)?)?"
+    ]
+   },
+   {
+    "os": [
+     "fedora"
+    ],
+    "vendors": [
+     "Fedora(?: Project)?"
+    ]
+   },
+   {
+    "os": [
+     "amzn"
+    ],
+    "vendors": [
+     "Amazon(?: Linux|\\.com)?"
+    ]
+   },
+   {
+    "os": [
+     "opensuse",
+     "opensuse-leap",
+     "opensuse-tumbleweed",
+     "sles",
+     "sled"
+    ],
+    "vendors": [
+     "(?:open)?SUSE(?: LINUX)?(?: Products GmbH)?"
+    ]
+   }
+  ],
+  "third_party_vendors": [
+   "nginx(?:\\.org| inc\\.?)?",
+   "Remi(?: Collet)?(?:.*<remi@.*>)?",
+   "Docker(?:,? Inc\\.?)?(?: <.*>)?",
+   "Zabbix(?: SIA)?",
+   "Grafana(?: Labs)?",
+   "ClickHouse(?:,? Inc\\.?)?"
+  ]
+ },
+ "products": [
+  {
+   "name": "erlang",
+   "images": [],
+   "binaries": [],
+   "packages": [
+    "^erlang$"
+   ]
+  },
+  {
+   "name": "java",
+   "images": [],
+   "binaries": [
+    "java"
+   ],
+   "packages": [
+    "^openjdk-\\d+(?:-(?:jre|jdk)(?:-headless)?)?$"
+   ]
+  },
+  {
+   "name": "openssl",
+   "images": [],
+   "binaries": [
+    "openssl"
+   ],
+   "packages": [
+    "^openssl(?:1\\.0)?$"
+   ]
+  },
+  {
+   "name": "openssh",
+   "images": [],
+   "binaries": [
+    "sshd"
+   ],
+   "packages": [
+    "^openssh$"
+   ]
+  },
+  {
+   "name": "apache httpd",
+   "images": [
+    "^(docker\\.io/)?(library/)?httpd$"
+   ],
+   "binaries": [
+    "apache2",
+    "httpd"
+   ],
+   "packages": [
+    "^apache2$"
+   ]
+  },
+  {
+   "name": "nginx",
+   "images": [
+    "^(docker\\.io/)?(library/)?nginx(-unprivileged)?$",
+    "(^|/)nginxinc/nginx(-unprivileged)?$"
+   ],
+   "binaries": [
+    "nginx"
+   ],
+   "packages": [
+    "^nginx$"
+   ]
+  },
+  {
+   "name": "php",
+   "images": [
+    "^(docker\\.io/)?(library/)?php$"
+   ],
+   "binaries": [
+    "php",
+    "php-fpm"
+   ],
+   "packages": [
+    "^php\\d+(?:\\.\\d+)?(?:-(?:cli|fpm))?$",
+    "^php-fpm$"
+   ]
+  },
+  {
+   "name": "redis",
+   "images": [
+    "^(docker\\.io/)?(library/)?redis$",
+    "bitnami/redis$"
+   ],
+   "binaries": [
+    "redis-server"
+   ],
+   "packages": [
+    "^redis$"
+   ]
+  },
+  {
+   "name": "valkey",
+   "images": [
+    "^(docker\\.io/)?(library/)?valkey$",
+    "^(docker\\.io/)?valkey/valkey$"
+   ],
+   "binaries": [
+    "valkey-server"
+   ],
+   "packages": [
+    "^valkey$"
+   ]
+  },
+  {
+   "name": "node.js",
+   "images": [
+    "^(docker\\.io/)?(library/)?node$"
+   ],
+   "binaries": [
+    "node"
+   ],
+   "packages": [
+    "^nodejs$"
+   ]
+  },
+  {
+   "name": "python",
+   "images": [
+    "^(docker\\.io/)?(library/)?python$"
+   ],
+   "binaries": [
+    "python3"
+   ]
+  },
+  {
+   "name": "postgresql",
+   "images": [
+    "^(docker\\.io/)?(library/)?postgres$",
+    "bitnami/postgresql$"
+   ],
+   "binaries": [
+    "postgres"
+   ],
+   "packages": [
+    "^postgresql-\\d+$"
+   ]
+  },
+  {
+   "name": "mysql",
+   "images": [
+    "^(docker\\.io/)?(library/)?(mysql|percona)$",
+    "percona/percona-(server|xtradb-cluster)$"
+   ],
+   "binaries": [
+    "mysqld"
+   ],
+   "packages": [
+    "^mysql-(\\d|community)"
+   ]
+  },
+  {
+   "name": "mariadb",
+   "images": [
+    "^(docker\\.io/)?(library/)?mariadb$"
+   ],
+   "binaries": [
+    "mariadbd"
+   ],
+   "packages": [
+    "^mariadb(-\\d+(\\.\\d+)?)?$"
+   ]
+  },
+  {
+   "name": "clickhouse",
+   "images": [
+    "clickhouse/clickhouse-server",
+    "yandex/clickhouse-server"
+   ],
+   "binaries": [
+    "clickhouse-server"
+   ],
+   "packages": [
+    "^clickhouse(-server)?$"
+   ]
+  },
+  {
+   "name": "haproxy",
+   "images": [
+    "^(docker\\.io/)?(library/)?haproxy$",
+    "haproxytech/haproxy(-alpine|-debian|-ubuntu)?$"
+   ],
+   "binaries": [
+    "haproxy"
+   ],
+   "packages": [
+    "^haproxy$"
+   ]
+  },
+  {
+   "name": "grafana",
+   "images": [
+    "grafana/grafana(-oss|-enterprise)?$"
+   ],
+   "binaries": [],
+   "packages": [
+    "^grafana(-enterprise)?$"
+   ]
+  },
+  {
+   "name": "zabbix",
+   "images": [
+    "zabbix/zabbix-(agent2?|server-(mysql|pgsql)|proxy-(mysql|sqlite3)|web-(apache|nginx)-(mysql|pgsql)|java-gateway|snmptraps|web-service|appliance)$"
+   ],
+   "binaries": [
+    "zabbix_server",
+    "zabbix_agent2"
+   ],
+   "packages": [
+    "^zabbix(-agent2?|-server-.*|-frontend-.*)?$"
+   ]
+  },
+  {
+   "name": "nextcloud",
+   "images": [
+    "^(docker\\.io/)?(library/)?nextcloud$"
+   ],
+   "binaries": [],
+   "apps": [
+    "nextcloud"
+   ]
+  },
+  {
+   "name": "rabbitmq",
+   "images": [
+    "^(docker\\.io/)?(library/)?rabbitmq$"
+   ],
+   "binaries": [],
+   "packages": [
+    "^rabbitmq-server$"
+   ]
+  },
+  {
+   "name": "memcached",
+   "images": [
+    "^(docker\\.io/)?(library/)?memcached$"
+   ],
+   "binaries": [
+    "memcached"
+   ],
+   "packages": [
+    "^memcached$"
+   ]
+  },
+  {
+   "name": "traefik",
+   "images": [
+    "^(docker\\.io/)?(library/)?traefik$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "docker engine",
+   "images": [],
+   "binaries": [
+    "dockerd"
+   ],
+   "packages": [
+    "^docker-ce$",
+    "^docker\\.io$"
+   ],
+   "programs": [
+    "docker-proxy",
+    "docker"
+   ]
+  },
+  {
+   "name": "containerd",
+   "images": [],
+   "binaries": [
+    "containerd"
+   ],
+   "packages": [
+    "^containerd(\\.io)?$"
+   ]
+  },
+  {
+   "name": "runc",
+   "images": [],
+   "binaries": [
+    "runc"
+   ],
+   "packages": [
+    "^runc$"
+   ]
+  },
+  {
+   "name": "kubernetes",
+   "images": [
+    "registry.k8s.io/kube-(proxy|apiserver|controller-manager|scheduler)$"
+   ],
+   "binaries": [
+    "kubelet"
+   ],
+   "programs": [
+    "kube-apiserver",
+    "k3s",
+    "k0s"
+   ]
+  },
+  {
+   "name": "ingress-nginx",
+   "images": [
+    "ingress-nginx/controller$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "cert-manager",
+   "images": [
+    "jetstack/cert-manager-(controller|webhook|cainjector|acmesolver|startupapicheck|ctl)$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "calico",
+   "images": [
+    "calico/(node|kube-controllers|cni|typha)$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "coredns",
+   "images": [
+    "coredns/coredns$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "vector",
+   "images": [
+    "(^|/)vector$",
+    "timberio/vector"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "postgres-exporter",
+   "images": [
+    "postgres_exporter$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "gost",
+   "images": [
+    "gogost/gost$"
+   ],
+   "binaries": []
+  },
+  {
+   "name": "certbot",
+   "images": [
+    "certbot/(certbot|dns-(cloudflare|digitalocean|dnsimple|dnsmadeeasy|gehirn|google|linode|luadns|nsone|ovh|rfc2136|route53|sakuracloud))$"
+   ],
+   "binaries": [
+    "certbot"
+   ]
+  }
+ ]
+}

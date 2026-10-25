@@ -1,0 +1,14 @@
+{
+  "ssh": {"ports": [22], "programs": ["^(sshd|dropbear)$"]},
+  "web": {"ports": [80, 443, 3000, 8000, 8080, 8443], "programs": ["^(nginx|apache2?|httpd|caddy|lighttpd|haproxy|traefik|node|nodejs|php([0-9.]+)?(-fpm)?|gunicorn|uvicorn)$"]},
+  "mail": {"ports": [25, 110, 143, 465, 587, 993, 995], "programs": ["^(master|postfix|exim[0-9]*|dovecot|sendmail|smtpd)$"]},
+  "dns": {"ports": [53], "programs": ["^(named|bind[0-9]*|dnsmasq|unbound|coredns)$"]},
+  "database": {"ports": [1433, 1521, 2379, 3306, 33060, 5432, 5433, 5984, 8123, 9000, 9440, 27017, 27018, 27019, 28015], "programs": ["^(postgres|postmaster|mysqld|mariadbd|mongod|mongos|clickhouse(-server)?|couchdb|etcd|rethinkdb)$"]},
+  "cache": {"ports": [6379, 6380, 11211], "programs": ["^(redis(-server)?|valkey(-server)?|memcached|keydb(-server)?)$"]},
+  "queue": {"ports": [4369, 5671, 5672, 6650, 9092, 15672, 25672], "programs": ["^(rabbitmq(-server)?|beam.smp|kafka|pulsar|activemq|nats(-server)?)$"]},
+  "search": {"ports": [8983, 9200, 9300], "programs": ["^(elasticsearch|opensearch|solr|meilisearch|typesense(-server)?)$"]},
+  "docker-api": {"ports": [2375, 2376], "programs": ["^dockerd$"]},
+  "k8s-api": {"ports": [6443, 10250, 10255, 10257, 10259], "programs": ["^(kube-apiserver|kubelet|k3s|k0s)$"]},
+  "monitoring": {"ports": [9090, 9093, 9100, 10050, 10051], "programs": ["^(prometheus|alertmanager|node_exporter|zabbix(_agentd|_agent2|_server|_proxy)?)$"]},
+  "other": {"ports": [], "programs": []}
+}
