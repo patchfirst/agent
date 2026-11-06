@@ -118,6 +118,9 @@ def configure_public_scopes(api=None, cafile=None, cache=None, offline=False, fa
     public_package_names.use(None)
 
 
+REPORT_TOKEN = re.compile(r'[A-Za-z0-9_-]{1,128}')
+
+
 def rejection_reason(error):
     """Rejection reason from the service's JSON response, without control characters."""
     try:
@@ -183,7 +186,7 @@ def rating_text(summary):
     parts = []
     for key, label in labels:
         entry = ratings.get(key) or unknown
-        value = (t('{score}/100 ({grade})', score=entry['score'], grade=entry['grade'])
+        value = (t('{score}/100 ({grade})', score=uplink.printable(entry['score']), grade=uplink.printable(entry['grade']))
                  if entry.get('score') is not None and entry.get('grade', '?') != '?' else '?')
         parts.append(label + ': ' + value)
     return parts[0] + '\n  ' + ' - '.join(parts[1:]) + '\n' + t(
@@ -194,7 +197,8 @@ def print_check_summary(summary):
     print(t("patchfirst: {message}", message=rating_text(summary)))
     highlighted = [row for row in summary.get("components", []) if row["level"] != "clean"]
     for component in highlighted[:5]:
-        print(t("  {level} - {name} {version}", level=t(component["level"]), name=component["name"], version=component["version"]))
+        print(t("  {level} - {name} {version}", level=uplink.printable(t(component["level"])),
+                name=uplink.printable(component["name"]), version=uplink.printable(component["version"])))
 
 
 def print_report_link(url):
@@ -274,7 +278,7 @@ def check(args):
     reply = check_call(args.api, "POST", "/v1/check", body, cafile=args.ca)
     try:
         report_id, key = reply["id"], reply["key"]
-        if not isinstance(report_id, str) or not isinstance(key, str):
+        if not all(isinstance(value, str) and REPORT_TOKEN.fullmatch(value) for value in (report_id, key)):
             raise ValueError()
     except (KeyError, ValueError):
         raise uplink.ApiError("check service returned an invalid response")
@@ -405,7 +409,7 @@ def main():
                 if not rows:
                     raise uplink.ApiError('project not found in the local list; run the run or dry-run command first')
             for path, number in rows:
-                print(t('{number}\t{path}', number=number, path=path))
+                print(t('{number}\t{path}', number=number, path=uplink.printable(path)))
             return 0
         if args.cmd == "check":
             args.api, args.ca = check_source(args)

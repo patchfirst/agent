@@ -6,6 +6,7 @@ import ipaddress
 import os
 import pkgutil
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -62,35 +63,47 @@ def ssh_address(target, options=()):
 def run_ssh(target, timeout=180, options=()):
     """Run remote.sh on the server over SSH (without sudo)."""
     cmd = ssh_args(target, options) + ["--", target, "sh -s"]
+    marker = section_marker()
     try:
-        r = subprocess.run(cmd, input=remote_script(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        r = subprocess.run(cmd, input=marked_script(marker), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, env=child_environment())
     except subprocess.TimeoutExpired:
         return {"error": "ssh timeout %d s" % timeout}
     except OSError:
         return {"error": "collection failed"}
     out = r.stdout.decode("utf-8", "replace")
-    if "@@os" not in out:
+    if "@@%s:os" % marker not in out:
         return {"error": "ssh exit code %d" % r.returncode}
-    return parse(out)
+    return parse(out, marker)
 
 
 def run_local(timeout=180):
     """Run remote.sh on this machine (agent)."""
     try:
-        r = subprocess.run(["sh", "-s"], input=remote_script(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        marker = section_marker()
+        r = subprocess.run(["sh", "-s"], input=marked_script(marker), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, env=child_environment())
     except (OSError, subprocess.TimeoutExpired):
         return {"error": "collection failed"}
     out = r.stdout.decode("utf-8", "replace")
-    return parse(out) if "@@os" in out else {"error": "collection failed"}
+    return parse(out, marker) if "@@%s:os" % marker in out else {"error": "collection failed"}
 
 
-def sections(text):
+def section_marker():
+    return secrets.token_hex(16)
+
+
+def marked_script(marker):
+    """A per-run section marker: process names and file contents cannot open sections."""
+    return ("PSR_SECTION=%s\n" % marker).encode() + remote_script()
+
+
+def sections(text, marker=None):
     out, name = {}, None
+    prefix = "@@%s:" % marker if marker else "@@"
     for line in text.splitlines():
-        if line.startswith("@@"):
-            name = line[2:].strip()
+        if line.startswith(prefix):
+            name = line[len(prefix):].strip()
             out[name] = []
         elif name and line.strip():
             out[name].append(line)
@@ -188,8 +201,8 @@ def packages(sec):
     return "", []
 
 
-def parse(text):
-    sec = sections(text)
+def parse(text, marker=None):
+    sec = sections(text, marker)
     manager, items = packages(sec)
     origins = {name: origin for name, origin, _ in tsv(sec.get("package_origins", []), 3)}
     for p in items:

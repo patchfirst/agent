@@ -66,31 +66,39 @@ def npm_json(data):
                 pending.append((package.get('dependencies', {}), dev))
 
 
+def yarn_value(match):
+    """Unquoted line value without regex backtracking over long whitespace runs."""
+    value = match[1].strip() if match else ''
+    value = value[1:] if value[:1] in ('"', "'") else value
+    value = value[:-1] if value[-1:] in ('"', "'") else value
+    return value.rstrip() or None
+
+
 def yarn(text):
-    blocks = re.split(r'(?=^[^\s#].*:\s*$)', text, flags=re.M)
+    blocks = re.split(r'(?=^[^\s#][^\n]*:[ \t\r]*$)', text, flags=re.M)
     for block in blocks:
         lines = block.splitlines()
         if not lines or not lines[0].rstrip().endswith(':'):
             continue
         key = lines[0].strip().rstrip(':').strip('"\'')
-        names = re.findall(r'(?:^|,\s*["\']?)((?:@[^/\s]+/)?[^@\s,"\']+)@', key)
-        version = re.search(r'^\s+version(?::|\s)\s*["\']?([^"\'\s]+)', block, re.M)
-        resolution = re.search(r'^\s+resolution:\s*["\']?(.+?)["\']?\s*$', block, re.M)
-        resolved = re.search(r'^\s+resolved\s+["\']?([^"\'\s]+)', block, re.M)
+        names = re.findall(r'(?:^|,\s*["\']?)((?:@[^/\s,@"\']+/)?[^@\s,"\']+)@', key)
+        version = re.search(r'^[ \t]+version(?::|[ \t])[ \t]*["\']?([^"\'\s]+)', block, re.M)
+        resolution = yarn_value(re.search(r'^[ \t]+resolution:([^\n]*)$', block, re.M))
+        resolved = re.search(r'^[ \t]+resolved[ \t]+["\']?([^"\'\s]+)', block, re.M)
         public = bool(resolved and (public_registry(resolved[1], 'npm') or
                       public_registry(resolved[1].replace('://registry.yarnpkg.com/', '://registry.npmjs.org/'), 'npm')))
         private = not public
         if re.search(r'@(?:file|git\+ssh|git\+https|https?|github|workspace|portal|link):', key):
             private = True
         if resolution:
-            match = re.match(r'((?:@[^/]+/)?[^@]+)@([^:]+):', resolution[1])
+            match = re.match(r'((?:@[^/]+/)?[^@]+)@([^:]+):', resolution)
             if match:
                 private = match[2] != 'npm'
                 names = [match[1]]
             else:
                 private = True
         elif '@npm:' in key:
-            names = re.findall(r'@npm:((?:@[^/\s]+/)?[^@\s,"\']+)@', key)
+            names = re.findall(r'@npm:((?:@[^/\s,@"\']+/)?[^@\s,"\']+)@', key)
         if version or private:
             for name in names:
                 yield row('npm', name, version[1] if version else None, private=private, public=public)
@@ -130,7 +138,7 @@ def python_toml(text):
     """Read only package scalars; the format also works with the agent's Python 3.8."""
     for block in re.split(r'^\[\[package\]\]\s*$', text, flags=re.M)[1:]:
         head = re.split(r'^\[package\.', block, maxsplit=1, flags=re.M)[0]
-        fields = dict(re.findall(r'^([\w-]+)\s*=\s*["\']([^"\'\n]*)["\']\s*$', head, re.M))
+        fields = dict(re.findall(r'^([\w-]+)[ \t]*=[ \t]*["\']([^"\'\n]*)["\'][ \t\r]*$', head, re.M))
         dev = fields.get('category') == 'dev'
         groups = re.search(r'^groups\s*=\s*\[([^]]*)\]', block, re.M)
         if groups:
@@ -143,7 +151,7 @@ def python_toml(text):
             public = not private
         table = re.search(r'^\[package.source\]\s*\n(.*?)(?=^\[|\Z)', block, re.M | re.S)
         if table:
-            provenance = dict(re.findall(r'^([\w-]+)\s*=\s*["\']([^"\'\n]*)["\']\s*$', table[1], re.M))
+            provenance = dict(re.findall(r'^([\w-]+)[ \t]*=[ \t]*["\']([^"\'\n]*)["\'][ \t\r]*$', table[1], re.M))
             public = provenance.get('type') in ('legacy', 'pypi') and public_registry(provenance.get('url'), 'PyPI')
             private = not public
         yield row('PyPI', fields.get('name'), fields.get('version'), dev, private, public)
@@ -220,7 +228,7 @@ def yaml_development(rows, text, manifest=None):
             if section in ('dependencies', 'devDependencies', 'optionalDependencies'):
                 group = section
             if line.rstrip().endswith(':') and '@' in line:
-                current = re.findall(r'(?:^|,\s*["\']?)((?:@[^/\s]+/)?[^@\s,"\']+)@',
+                current = re.findall(r'(?:^|,\s*["\']?)((?:@[^/\s,@"\']+/)?[^@\s,"\']+)@',
                                      line.rstrip(':').strip('"\''))
         if section == 'importers':
             match = re.match(r'^    (dependencies|devDependencies|optionalDependencies):', line)
@@ -302,7 +310,7 @@ def private_registry_config(filename, text):
             public_registry(value.replace('://registry.yarnpkg.com/', '://registry.npmjs.org/'), 'npm'))
         rules[scope] = not public
     if name != '.yarnrc.yml':
-        for match in re.finditer(r"^\s*(?:(@[a-z0-9_.~-]+):)?registry\s*(?:=|\s)\s*[\"']?([^\s\"'#]*)", text, re.M | re.I):
+        for match in re.finditer(r"^[ \t]*(?:(@[a-z0-9_.~-]+):)?registry[ \t]*(?:=|[ \t])[ \t]*[\"']?([^\s\"'#]*)", text, re.M | re.I):
             assign((match[1] or '*').lower(), match[2])
     else:
         in_scopes, scope = False, None
@@ -411,7 +419,7 @@ def collect(files, limit=MAX_PACKAGES, npm_registry=()):
         # Only an explicitly private primary index establishes provenance here.
         indexes = re.findall(r'(?:^|\s)(?:--index-url(?:\s+|=)|-i(?:\s+|=)?)(\S+)', text)
         if indexes and not public_registry(indexes[-1], 'PyPI'):
-            names = re.findall(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~\[]|$)', text, re.M)
+            names = re.findall(r'^[ \t]*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~\[]|$)', text, re.M)
             private_names.setdefault(path.rsplit('/', 1)[0], set()).update(map(normalize, names))
     for package in result:
         if package['eco'] != 'PyPI' or not package['lock'].endswith('/METADATA'):

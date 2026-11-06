@@ -7,8 +7,14 @@ import anonymize
 from agent_messages import t
 from net import UA, http
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 USER_AGENT = "%s patchfirst/%s" % (UA, VERSION)
+
+
+def printable(value):
+    """Server and filesystem text reaches a root terminal without control or bidi sequences."""
+    return "".join(ch if ch.isprintable() else "\\x%02x" % ord(ch) if ord(ch) < 256 else "\\u%04x" % ord(ch)
+                   for ch in str(value))
 
 
 class ApiError(RuntimeError):
@@ -17,8 +23,12 @@ class ApiError(RuntimeError):
         self.status = status
 
 
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
 def request(url, data=None, headers=None, **options):
-    """Every agent request names the agent version."""
+    """Every agent request names the agent version, stays on its origin and is size-bounded."""
+    options = dict({"same_origin": True, "max_bytes": MAX_RESPONSE_BYTES}, **options)
     return http(url, data, dict(headers or {}, **{"User-Agent": USER_AGENT}), **options)
 
 
@@ -36,7 +46,7 @@ class Link:
             raw = request(self.url + path, data, headers, timeout=600, retries=1, method=method, cafile=self.cafile)
         except urllib.error.HTTPError as e:
             raise ApiError(t("API {method} {path} returned {status}: {reason}", method=method, path=path.split("?")[0],
-                             status=e.code, reason=e.read().decode("utf-8", "replace")[:300]), e.code)
+                             status=e.code, reason=printable(e.read(4096).decode("utf-8", "replace")[:300])), e.code)
         except urllib.error.URLError as e:
             raise ApiError(t("API {url} is unavailable: {reason}", url=self.url, reason=e.reason))
         return json.loads(raw) if raw else None

@@ -28,7 +28,7 @@ except NameError:
 configure()
 
 # Same as uplink.USER_AGENT: the installer runs separately from the agent package.
-UA = 'psr/1.0 (+security inventory) patchfirst/1.2.0'
+UA = 'psr/1.0 (+security inventory) patchfirst/1.2.1'
 
 
 def canonical_config(config):
@@ -366,6 +366,9 @@ def choose_registry(old_registry, registry):
     return source
 
 
+ROOT_CHECK_CACHE = Path('/var/cache/patchfirst/public-names.gz')
+
+
 def remove_public_name_cache(cache):
     """Remove this installation's cache files without matching sibling state."""
     cache = Path(cache)
@@ -456,6 +459,10 @@ def uninstall(purge=False, root=None):
             for suffix in ('', '.projects.json.lock', '.migration.lock', '.migration.json'):
                 Path(str(cfg) + suffix).unlink(missing_ok=True)
         remove_public_name_cache(folder / 'public-names.gz')
+        if root:
+            remove_public_name_cache(ROOT_CHECK_CACHE)
+            with contextlib.suppress(OSError):
+                ROOT_CHECK_CACHE.parent.rmdir()
         if purge:
             registry.unlink(missing_ok=True)
             old_registry.unlink(missing_ok=True)

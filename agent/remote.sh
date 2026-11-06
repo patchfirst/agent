@@ -1,6 +1,6 @@
 #!/bin/sh
 export LC_ALL=C PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
-sec() { printf '\n@@%s\n' "$1"; }
+sec() { printf '\n@@%s%s\n' "${PSR_SECTION:+$PSR_SECTION:}" "$1"; }
 has() { command -v "$1" >/dev/null 2>&1; }
 t() { timeout 10 "$@" 2>&1 | head -3; }
 
@@ -459,7 +459,7 @@ ps -eo comm=,args= 2>/dev/null | awk '{print $1"\t"$2}' | sort -u
 
 sec procpkg
 if has dpkg; then
-  ps -eo args= 2>/dev/null | awk '{print $1}' | grep '^/' | sort -u | while read -r p; do [ -e "$p" ] && readlink -f "$p"; done | sort -u | xargs -r dpkg -S 2>/dev/null
+  ps -eo args= 2>/dev/null | awk '{print $1}' | grep '^/' | sort -u | while read -r p; do [ -e "$p" ] && readlink -f "$p"; done | sort -u | tr '\n' '\0' | xargs -0 -r dpkg -S 2>/dev/null
 fi
 
 sec bins

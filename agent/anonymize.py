@@ -88,6 +88,13 @@ class Anonymizer:
         return self.public_names is not None and any(
             public_package_names.canonical(eco, name) in self.public_names.get(eco, ()) for eco in ecosystems)
 
+    def sendable(self, name, ecosystem, package):
+        """Names other owners may use privately leave only for copies from the public registry."""
+        if not self.listed(name, [ecosystem]):
+            return False
+        public = package.get('public') is True and not package.get('private')
+        return public or not self.listed(name, [public_package_names.REGISTRY_ONLY + ecosystem])
+
     def public_source(self, source):
         normalized = package_rules.kernel_source(source)
         if any(package_rules.is_kernel(source, eco) for eco in self.os_ecosystems) and self.listed(normalized, self.os_ecosystems):
@@ -183,8 +190,9 @@ class Anonymizer:
         pattern = dependency_locks.NPM_NAME if eco == 'npm' else dependency_locks.PYPI_NAME
         valid = bool(pattern.fullmatch(name)) and not self.marked(name)
         # Listed identities are already public, even when this installed copy
-        # comes from a private source. Source proof governs clean counts only.
-        named = valid and self.listed(name, [eco])
+        # comes from a private source. Source proof governs clean counts and
+        # registry-only names.
+        named = valid and self.sendable(name, eco, package)
         out = {'eco': eco, 'lock': self.location('lock', package['lock'], 'npm' if eco == 'npm' else 'python'),
                'name': name if named else self.dependency_label(eco, name, package['version']),
                'version': services.public_version(package['version']) if named else ''}
@@ -200,7 +208,7 @@ class Anonymizer:
 
     def composer(self, c):
         valid = not self.marked(c['name']) and re.fullmatch(r'[a-z0-9_.-]+/[a-z0-9_.-]+', c['name'], re.I)
-        named = valid and self.listed(c['name'], ['Packagist'])
+        named = valid and self.sendable(c['name'], 'Packagist', c)
         out = {'lock': self.location('lock', c['lock'], 'composer'),
                'name': c['name'].lower() if named else self.dependency_label('Packagist', c['name'], c['version']),
                'version': services.public_version(c['version']) if named else '', 'dev': bool(c.get('dev'))}

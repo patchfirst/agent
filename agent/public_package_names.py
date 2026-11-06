@@ -19,6 +19,7 @@ import urllib.request
 import zlib
 
 from agent_messages import t
+from net import origin
 from package_rules import ecosystems
 
 DEFAULT_API = 'https://patchfirst.dev'
@@ -29,11 +30,24 @@ MAX_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 2850
 _HEADER = re.compile(br'#patchfirst-public-names 2 (0|[1-9][0-9]{0,18})\n\Z')
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def content_etag(etag, digest):
+    """Only the hash of the received bytes is echoed back, so an ETag cannot tag a client."""
+    return etag if etag in ('"%s"' % digest, 'W/"%s"' % digest) else ''
 _active = None
 
 
+# Names also listed under this prefix leave only for packages proven to come from the public registry.
+REGISTRY_ONLY = 'registry:'
+
+
+def base_ecosystem(ecosystem):
+    return ecosystem[len(REGISTRY_ONLY):] if ecosystem.startswith(REGISTRY_ONLY) else ecosystem
+
+
 def canonical(ecosystem, name):
-    return re.sub(r'[-_.]+', '-', name).lower() if ecosystem == 'PyPI' else name.lower()
+    return re.sub(r'[-_.]+', '-', name).lower() if base_ecosystem(ecosystem) == 'PyPI' else name.lower()
 
 
 def use(values):
@@ -59,7 +73,13 @@ def needed_ecosystems(inventories):
     return needed
 
 
+ROOT_CACHE = Path('/var/cache/patchfirst/public-names.gz')
+
+
 def default_cache():
+    # Root never follows $HOME: sudo -E would put its cache in a user-writable folder.
+    if os.geteuid() == 0:
+        return ROOT_CACHE
     return Path(os.path.expanduser('~/.local/share/patchfirst/public-names.gz'))
 
 
@@ -96,7 +116,7 @@ def read_list(path, needed=()):
                     if len(eco) > 200 or not eco.isprintable() and _CONTROL.search(eco):
                         raise ValueError('invalid public package-name list')
                     previous_eco = raw_eco
-                    bucket = selected.setdefault(eco, set()) if eco in needed else None
+                    bucket = selected.setdefault(eco, set()) if base_ecosystem(eco) in needed else None
                 name = raw_name.decode('utf-8')
                 if len(name) > 512 or not name.isprintable() and _CONTROL.search(name):
                     raise ValueError('invalid public package-name list')
@@ -110,7 +130,7 @@ def read_list(path, needed=()):
 
 @contextmanager
 def cache_lock(path, exclusive):
-    flags = os.O_RDWR | os.O_CREAT if exclusive else os.O_RDONLY
+    flags = (os.O_RDWR | os.O_CREAT if exclusive else os.O_RDONLY) | os.O_NOFOLLOW
     fd = os.open(str(path) + '.lock', flags, 0o600)
     with os.fdopen(fd, 'rb') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
@@ -142,8 +162,8 @@ def read_cache(path, url):
                 return None
             saved = json.loads(raw)
             if (set(saved) != {'format', 'url', 'etag', 'sha256', 'revision'} or saved['format'] != 2 or
-                    saved['url'] != url or not isinstance(saved['etag'], str) or len(saved['etag']) > 512 or
-                    _CONTROL.search(saved['etag']) or not isinstance(saved['sha256'], str) or
+                    saved['url'] != url or not isinstance(saved['etag'], str) or not isinstance(saved['sha256'], str) or
+                    saved['etag'] != content_etag(saved['etag'], saved['sha256']) or
                     not re.fullmatch('[0-9a-f]{64}', saved['sha256']) or type(saved['revision']) is not int or
                     not 0 <= saved['revision'] < 2 ** 63):
                 return None
@@ -244,10 +264,10 @@ def download(url, headers, cafile, deadline, directory):
                 if remaining <= 0:
                     raise TimeoutError('public package-name download timed out')
                 with urllib.request.urlopen(req, timeout=remaining, context=context) as response:
+                    if origin(getattr(response, 'geturl', lambda: url)()) != origin(url):
+                        raise OSError('public package-name list redirected to another origin')
                     digest = read_response(response, deadline, target)
-                    etag = response.headers.get('ETag', '')
-                    if len(etag) > 512 or _CONTROL.search(etag):
-                        etag = ''
+                    etag = content_etag(response.headers.get('ETag', ''), digest)
             if not cancelled.is_set():
                 result.put((True, {'format': 2, 'url': url, 'etag': etag, 'sha256': digest,
                                    'path': Path(temporary)}))
