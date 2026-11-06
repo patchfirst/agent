@@ -11,7 +11,7 @@ import urllib.request
 UA = "psr/1.0 (+security inventory)"
 
 
-def http(url, data=None, headers=None, timeout=60, retries=3, method=None, cafile=None):
+def http(url, data=None, headers=None, timeout=60, retries=3, method=None, cafile=None, response_headers=None):
     if os.environ.get("PSR_OFFLINE") == "1":
         raise RuntimeError("Network disabled for offline report generation")
     body = json.dumps(data).encode() if isinstance(data, (dict, list)) else data
@@ -24,6 +24,8 @@ def http(url, data=None, headers=None, timeout=60, retries=3, method=None, cafil
             context = ssl.create_default_context(cafile=cafile) if cafile else None
             req = urllib.request.Request(url, body, hdrs, method=method)
             with urllib.request.urlopen(req, timeout=timeout, context=context) as r:
+                if response_headers is not None:
+                    response_headers.update((name.lower(), value) for name, value in r.headers.items())
                 raw = r.read()
                 return gzip.decompress(raw) if r.headers.get("Content-Encoding") == "gzip" else raw
         except urllib.error.HTTPError as e:

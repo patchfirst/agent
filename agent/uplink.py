@@ -4,15 +4,16 @@ import json
 import urllib.error
 
 import anonymize
+from agent_messages import t
 from net import UA, http
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 USER_AGENT = "%s patchfirst/%s" % (UA, VERSION)
 
 
 class ApiError(RuntimeError):
     def __init__(self, message, status=None):
-        super().__init__(message)
+        super().__init__(t(message))
         self.status = status
 
 
@@ -34,9 +35,10 @@ class Link:
         try:
             raw = request(self.url + path, data, headers, timeout=600, retries=1, method=method, cafile=self.cafile)
         except urllib.error.HTTPError as e:
-            raise ApiError("API %s %s → %d: %s" % (method, path.split("?")[0], e.code, e.read().decode()[:300]), e.code)
+            raise ApiError(t("API {method} {path} returned {status}: {reason}", method=method, path=path.split("?")[0],
+                             status=e.code, reason=e.read().decode("utf-8", "replace")[:300]), e.code)
         except urllib.error.URLError as e:
-            raise ApiError("API %s is unavailable: %s" % (self.url, e.reason))
+            raise ApiError(t("API {url} is unavailable: {reason}", url=self.url, reason=e.reason))
         return json.loads(raw) if raw else None
 
     def fleet_path(self, tail=""):
@@ -44,7 +46,7 @@ class Link:
 
 
 def upload(link, host_uuid, inv, secret, words, *, projects=None, payload=None):
-    """→ anonymized summary. The server name never leaves: the service knows the server only by its UUID."""
+    """Return the pseudonymized summary. The server name never leaves: the service knows the server only by its UUID."""
     if payload is None:
         an = anonymize.Anonymizer(secret, words, projects=projects)
         payload = an.payload(inv)

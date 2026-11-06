@@ -19,8 +19,16 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+# The served installer embeds the catalog before this module. Normal package
+# imports reuse the same functions from the agent catalog.
+try:
+    t, configure, select, LANGUAGES
+except NameError:
+    from agent_messages import t, configure, select, LANGUAGES
+configure()
+
 # Same as uplink.USER_AGENT: the installer runs separately from the agent package.
-UA = 'psr/1.0 (+security inventory) patchfirst/1.1.1'
+UA = 'psr/1.0 (+security inventory) patchfirst/1.2.0'
 
 
 def canonical_config(config):
@@ -63,7 +71,7 @@ def runtime_config(config):
         handle = stack.enter_context(os.fdopen(fd, 'a'))
         metadata = os.fstat(handle.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-            raise PermissionError('unsafe migration lock owner or type')
+            raise PermissionError(t('unsafe migration lock owner or type'))
         os.fchmod(handle.fileno(), 0o600)
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
         state = Path(canonical + '.migration.json')
@@ -78,7 +86,7 @@ def runtime_config(config):
             with os.fdopen(state_fd) as active:
                 metadata = os.fstat(active.fileno())
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-                    raise PermissionError('unsafe migration state owner or type')
+                    raise PermissionError(t('unsafe migration state owner or type'))
                 config = json.load(active)['active']
         elif canonical != config and not Path(config).exists() and Path(canonical).exists():
             config = canonical
@@ -95,14 +103,14 @@ def reject_legacy_schedule(config):
         try:
             current = subprocess.run(['crontab', '-l'], text=True, capture_output=True, timeout=10)
         except subprocess.TimeoutExpired as error:
-            raise OSError('crontab -l did not respond within 10 s') from error
+            raise OSError(t('crontab -l did not respond within 10 s')) from error
         for row in current.stdout.splitlines():
             if row.strip() and not row.lstrip().startswith('#'):
                 for name in jobs:
                     jobs[name] = jobs[name] or bool(re.search(r'# %s\s*$' % name, row))
     if all(jobs.values()):
-        raise ValueError('two cron jobs found: patchfirst and psr-agent; sending canceled: '
-                         'reinstall using the command from the dashboard to keep a single job')
+        raise ValueError(t('two cron jobs found: patchfirst and psr-agent; sending canceled: '
+                          'reinstall using the command from the dashboard to keep a single job'))
 
 
 def defer_runtime_directory_cleanup(runtime):
@@ -154,7 +162,7 @@ def drain(executables, timeout=120):
         if not running:
             return
         if time.monotonic() >= deadline:
-            raise TimeoutError('waiting for the running agent exceeded %s seconds; cleanup canceled, retry after the agent finishes' % timeout)
+            raise TimeoutError(t('waiting for the running agent exceeded {timeout} seconds; cleanup canceled, retry after the agent finishes', timeout=timeout))
         time.sleep(.05)
 
 
@@ -200,20 +208,20 @@ def origin(value):
     """Validate the API URL and extract the agent download origin."""
     api = urllib.parse.urlsplit(value)
     if api.scheme not in ('https', 'http') or not api.hostname or api.username or api.password:
-        raise ValueError('an http(s) API URL without a username is required')
+        raise ValueError(t('an http(s) API URL without a username is required'))
     if api.query or api.fragment:
-        raise ValueError('the API URL must not contain a query or fragment')
+        raise ValueError(t('the API URL must not contain a query or fragment'))
     if api.scheme == 'http' and api.hostname not in ('localhost', '127.0.0.1', '::1'):
-        raise ValueError('HTTPS is required for a remote API')
+        raise ValueError(t('HTTPS is required for a remote API'))
     return urllib.parse.urlunsplit((api.scheme, api.netloc, '', '', ''))
 
 
 def validate_config(config):
     if not isinstance(config, dict):
-        raise ValueError('config must be an object')
+        raise ValueError(t('config must be an object'))
     for field in ('api', 'fleet', 'token', 'secret', 'host', 'host_uuid'):
         if not isinstance(config.get(field), str) or not config[field]:
-            raise ValueError('missing field ' + field)
+            raise ValueError(t('missing field {field}', field=field))
     origin(config['api'])
     return config
 
@@ -230,7 +238,7 @@ class SameOriginRedirect(urllib.request.HTTPRedirectHandler):
     """Do not redirect the agent download request to a different origin."""
     def redirect_request(self, request, response, code, message, headers, new_url):
         if origin(new_url) != origin(request.full_url):
-            raise ValueError('the agent must be downloaded from the API domain')
+            raise ValueError(t('the agent must be downloaded from the API domain'))
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
@@ -245,23 +253,23 @@ def download_agent(config, work, mode):
         with opener.open(source + '/agent/' + name, timeout=60) as response:
             data = response.read(limit + 1)
         if not data or len(data) > limit:
-            raise ValueError('invalid agent size')
+            raise ValueError(t('invalid agent size'))
         return data
 
     if mode == 'python':
         target = Path(work, 'patchfirst.pyz')
         target.write_bytes(fetch('patchfirst.pyz', 16 * 1024 * 1024))
         if not zipfile.is_zipfile(target):
-            raise ValueError('the downloaded agent is not a zip archive')
+            raise ValueError(t('the downloaded agent is not a zip archive'))
     else:
         artifact = os.environ['PSR_BOOTSTRAP_ARTIFACT']
         if artifact not in ('patchfirst-linux-x86_64', 'patchfirst-linux-x86_64-musl',
                             'psr-agent-linux-x86_64', 'psr-agent-linux-x86_64-musl'):
-            raise ValueError('invalid binary name')
+            raise ValueError(t('invalid binary name'))
         target = Path(work, 'psr-agent' if artifact.startswith('psr-agent-') else 'patchfirst')
         size = target.stat().st_size
         if not 0 < size <= 64 * 1024 * 1024:
-            raise ValueError('invalid agent size')
+            raise ValueError(t('invalid agent size'))
         digest = hashlib.sha256()
         with target.open('rb') as agent:
             for chunk in iter(lambda: agent.read(64 * 1024), b''):
@@ -270,22 +278,26 @@ def download_agent(config, work, mode):
         matches = [line.split()[0] for line in sums.splitlines()
                    if len(line.split()) == 2 and line.split()[1] == artifact]
         if matches != [digest.hexdigest()]:
-            raise ValueError('SHA-256 mismatch, installation canceled')
+            raise ValueError(t('SHA-256 mismatch, installation canceled'))
         target.chmod(0o700)
 
 
 def prepare(argv, mode=None):
     """Validate config from the environment and prepare it along with the cron job."""
+    configure()
     try:
         work, folder, config_path, root = argv
         encoded = os.environ.get('PSR_CONFIG', '')
         if encoded:
             if not re.fullmatch(r'[A-Za-z0-9_-]+', encoded):
-                raise ValueError('config in b64url format is required')
+                raise ValueError(t('config in b64url format is required'))
             config = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
         else:
             config = json.loads(Path(os.environ['PSR_EXISTING_CONFIG']).read_text())
         validate_config(config)
+        explicit_language = os.environ.get('PATCHFIRST_LANG')
+        if explicit_language in LANGUAGES:
+            config['lang'] = explicit_language
         previous = os.environ.get('PSR_EXISTING_CONFIG')
         old = previous_config(previous) if previous and encoded else None
         # Only updating the same server preserves HMAC labels. The region/API
@@ -295,10 +307,10 @@ def prepare(argv, mode=None):
         source = origin(config['api'])
         bootstrap = os.environ.get('PSR_BOOTSTRAP_API')
         if bootstrap and source != origin(bootstrap):
-            raise ValueError('config.api does not match the installer download URL')
+            raise ValueError(t('config.api does not match the installer download URL'))
         for path in (folder, config_path, sys.executable):
             if any(char in path for char in '\r\n'):
-                raise ValueError('newline in path')
+                raise ValueError(t('newline in path'))
         if mode is None and bootstrap:
             mode = 'binary'
         if mode:
@@ -311,10 +323,12 @@ def prepare(argv, mode=None):
                 shlex.quote(value) for value in executable) + ' "$@"\n')
         command = 'TMPDIR=' + shlex.quote(folder) + ' ' + ' '.join(shlex.quote(value) for value in (
             *executable, 'run', '--config', config_path))
+        if config.get('lang') in LANGUAGES:
+            command = 'PATCHFIRST_LANG=' + config['lang'] + ' ' + command
         command = command.replace('%', '\\%')
         timing = os.environ.get('PSR_CRON_SCHEDULE', '')
         if timing and not re.fullmatch(r'[A-Za-z0-9*/,-]+(?: [A-Za-z0-9*/,-]+){4}|@(?:reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)', timing):
-            raise ValueError('invalid cron schedule')
+            raise ValueError(t('invalid cron schedule'))
         timing = timing or '%d */6 * * *' % secrets.randbelow(60)
         schedule = '%s %s%s >/dev/null 2>&1 # %s\n' % (
             timing, 'root ' if root == '1' else '', command, name)
@@ -322,7 +336,7 @@ def prepare(argv, mode=None):
         Path(work, 'cron').write_text(schedule)
         return 0
     except Exception as error:
-        print('patchfirst: installation failed: ' + str(error), file=sys.stderr)
+        print(t('patchfirst: installation failed: {error}', error=error), file=sys.stderr)
         return 1
 
 
@@ -348,12 +362,24 @@ def choose_registry(old_registry, registry):
         if all(right.get(path) == number for path, number in left.items()):
             return registry
         if not all(left.get(path) == number for path, number in right.items()):
-            raise ValueError('project registry conflict; operation stopped')
+            raise ValueError(t('project registry conflict; operation stopped'))
     return source
+
+
+def remove_public_name_cache(cache):
+    """Remove this installation's cache files without matching sibling state."""
+    cache = Path(cache)
+    if not cache.parent.is_dir() or cache.parent.is_symlink():
+        return
+    pattern = re.compile(re.escape(cache.name) + r'(?:\.meta\.json|\.lock|\.[0-9a-f]{64}\.gz)\Z')
+    for item in cache.parent.iterdir():
+        if pattern.fullmatch(item.name) and not item.is_dir():
+            item.unlink(missing_ok=True)
 
 
 def uninstall(purge=False, root=None):
     """Stop new calls, drain active gather calls, and save the latest registry."""
+    configure()
     root = os.geteuid() == 0 if root is None else root
     folder = Path('/opt/patchfirst') if root else Path.home() / '.local/share/patchfirst'
     legacy = Path('/opt/psr') if root else Path.home() / '.local/share/psr'
@@ -426,8 +452,10 @@ def uninstall(purge=False, root=None):
                 temp.chmod(0o400)
                 os.replace(temp, old_registry)
         for cfg in (config, old_config):
+            remove_public_name_cache(str(cfg) + '.public-names.gz')
             for suffix in ('', '.projects.json.lock', '.migration.lock', '.migration.json'):
                 Path(str(cfg) + suffix).unlink(missing_ok=True)
+        remove_public_name_cache(folder / 'public-names.gz')
         if purge:
             registry.unlink(missing_ok=True)
             old_registry.unlink(missing_ok=True)
@@ -454,14 +482,15 @@ def uninstall(purge=False, root=None):
             except OSError:
                 if set(directory.iterdir()).issubset(expected):
                     continue  # Expected rollback snapshots, not unrelated files.
-                print('patchfirst: directory %s retained: contains other files' % directory,
+                print(t('patchfirst: directory {directory} retained: contains other files', directory=directory),
                       file=sys.stderr)
-    print('patchfirst: monitoring removed')
+    print(t('patchfirst: monitoring removed'))
     return 0
 
 
 def commit(argv):
     """Close legacy entrypoints, drain legacy code, then migrate the registry/cron."""
+    configure()
     script, previous, canonical = argv
     try:
         with contextlib.ExitStack() as stack:
@@ -475,7 +504,7 @@ def commit(argv):
             if legacy_config and new.exists() and not os.environ.get('PSR_CONFIG'):
                 right = previous_config(canonical)
                 if right and any(legacy_config[field] != right[field] for field in ('secret', 'host_uuid')):
-                    raise ValueError('config conflict: secret or host_uuid; migration stopped')
+                    raise ValueError(t('config conflict: secret or host_uuid; migration stopped'))
             old_registry = Path(previous + '.projects.json')
             registry = Path(canonical + '.projects.json')
             def registry_source():
@@ -510,5 +539,5 @@ def commit(argv):
             Path(script).with_name('cutover.json').write_text(json.dumps({'active': canonical}) + '\n')
             return subprocess.run(['/bin/sh', script], env=env).returncode
     except (OSError, ValueError, KeyError) as error:
-        print('patchfirst: installation failed: ' + str(error), file=sys.stderr)
+        print(t('patchfirst: installation failed: {error}', error=error), file=sys.stderr)
         return 1

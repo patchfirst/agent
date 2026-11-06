@@ -66,20 +66,24 @@ def run_ssh(target, timeout=180, options=()):
         r = subprocess.run(cmd, input=remote_script(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, env=child_environment())
     except subprocess.TimeoutExpired:
-        return {"error": "таймаут ssh %d с" % timeout}
+        return {"error": "ssh timeout %d s" % timeout}
     except OSError:
-        return {"error": "could not start ssh: a system SSH client is required"}
-    out, err = r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+        return {"error": "collection failed"}
+    out = r.stdout.decode("utf-8", "replace")
     if "@@os" not in out:
-        return {"error": (err.strip().splitlines() or ["ssh: код %d" % r.returncode])[-1]}
+        return {"error": "ssh exit code %d" % r.returncode}
     return parse(out)
 
 
 def run_local(timeout=180):
     """Run remote.sh on this machine (agent)."""
-    r = subprocess.run(["sh", "-s"], input=remote_script(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       timeout=timeout, env=child_environment())
-    return parse(r.stdout.decode("utf-8", "replace"))
+    try:
+        r = subprocess.run(["sh", "-s"], input=remote_script(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, env=child_environment())
+    except (OSError, subprocess.TimeoutExpired):
+        return {"error": "collection failed"}
+    out = r.stdout.decode("utf-8", "replace")
+    return parse(out) if "@@os" in out else {"error": "collection failed"}
 
 
 def sections(text):

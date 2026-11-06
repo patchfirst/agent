@@ -27,13 +27,16 @@ def public_registry(value, eco):
         return False
 
 
-def row(eco, name, version, dev=False, private=False):
+def row(eco, name, version, dev=False, private=False, public=False):
     pattern = NPM_NAME if eco == 'npm' else PYPI_NAME
     if not isinstance(name, str) or not pattern.fullmatch(name) or (not private and not exact(version)):
         return None
     result = {'eco': eco, 'name': name.lower(), 'version': version if exact(version) else '0'}
     if private:
         result['private'] = True
+    elif public:
+        # Positive provenance only; the absence of private evidence is insufficient.
+        result['public'] = True
     if dev:
         result['dev'] = True
     return result
@@ -47,7 +50,8 @@ def npm_json(data):
             name = package.get('name') or path.rsplit('node_modules/', 1)[-1]
             private = package.get('link') or not path.startswith('node_modules/') and '/node_modules/' not in path
             private = private or not public_registry(package.get('resolved'), 'npm')
-            yield row('npm', name, package.get('version'), package.get('dev') or package.get('devOptional'), private)
+            yield row('npm', name, package.get('version'), package.get('dev') or package.get('devOptional'), private,
+                      public_registry(package.get('resolved'), 'npm'))
         return
     pending = [(data.get('dependencies', {}), False)]
     while pending:
@@ -57,7 +61,8 @@ def npm_json(data):
         for name, package in packages.items():
             if isinstance(package, dict):
                 dev = parent_dev or package.get('dev')
-                yield row('npm', name, package.get('version'), dev, not public_registry(package.get('resolved'), 'npm'))
+                public = public_registry(package.get('resolved'), 'npm')
+                yield row('npm', name, package.get('version'), dev, not public, public)
                 pending.append((package.get('dependencies', {}), dev))
 
 
@@ -72,8 +77,9 @@ def yarn(text):
         version = re.search(r'^\s+version(?::|\s)\s*["\']?([^"\'\s]+)', block, re.M)
         resolution = re.search(r'^\s+resolution:\s*["\']?(.+?)["\']?\s*$', block, re.M)
         resolved = re.search(r'^\s+resolved\s+["\']?([^"\'\s]+)', block, re.M)
-        private = not (resolved and (public_registry(resolved[1], 'npm') or
-                       public_registry(resolved[1].replace('://registry.yarnpkg.com/', '://registry.npmjs.org/'), 'npm')))
+        public = bool(resolved and (public_registry(resolved[1], 'npm') or
+                      public_registry(resolved[1].replace('://registry.yarnpkg.com/', '://registry.npmjs.org/'), 'npm')))
+        private = not public
         if re.search(r'@(?:file|git\+ssh|git\+https|https?|github|workspace|portal|link):', key):
             private = True
         if resolution:
@@ -87,7 +93,7 @@ def yarn(text):
             names = re.findall(r'@npm:((?:@[^/\s]+/)?[^@\s,"\']+)@', key)
         if version or private:
             for name in names:
-                yield row('npm', name, version[1] if version else None, private=private)
+                yield row('npm', name, version[1] if version else None, private=private, public=public)
 
 
 def pnpm(text):
@@ -113,6 +119,9 @@ def pnpm(text):
             tarball = re.search(r'tarball:\s*["\']?([^\s,}\'\"]+)', line)
             if not tarball or not public_registry(tarball[1], 'npm'):
                 current['private'] = True
+                current.pop('public', None)
+            else:
+                current['public'] = True
     if current:
         yield current
 
@@ -127,14 +136,17 @@ def python_toml(text):
         if groups:
             dev = 'main' not in re.findall(r'["\']([^"\']+)["\']', groups[1])
         source = re.search(r'^source\s*=\s*\{([^}]*)\}', block, re.M)
-        private = False
+        private, public = False, False
         if source:
             registry = re.search(r'\bregistry\s*=\s*["\']([^"\']+)', source[1])
             private = not registry or not public_registry(registry[1], 'PyPI')
+            public = not private
         table = re.search(r'^\[package.source\]\s*\n(.*?)(?=^\[|\Z)', block, re.M | re.S)
         if table:
-            private = True
-        yield row('PyPI', fields.get('name'), fields.get('version'), dev, private)
+            provenance = dict(re.findall(r'^([\w-]+)\s*=\s*["\']([^"\'\n]*)["\']\s*$', table[1], re.M))
+            public = provenance.get('type') in ('legacy', 'pypi') and public_registry(provenance.get('url'), 'PyPI')
+            private = not public
+        yield row('PyPI', fields.get('name'), fields.get('version'), dev, private, public)
 
 
 def requirements(text, dev=False):
@@ -143,10 +155,12 @@ def requirements(text, dev=False):
     indexes += re.findall(r'(?:^|\s)-(?:i|f)(?:\s+|=)?(\S+)', text)
     private_index = any(not public_registry(url, 'PyPI') for url in indexes)
     private_index = private_index or '--no-index' in text
+    primary = re.findall(r'(?:^|\s)(?:--index-url(?:\s+|=)|-i(?:\s+|=)?)(\S+)', text)
+    public = bool(primary) and not private_index
     for line in text.replace('\\\n', ' ').splitlines():
         match = re.match(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[\w, .-]+\])?\s*==\s*([^\s;#]+)(.*)$', line)
         if match and (not match[3].strip() or match[3].lstrip().startswith((';', '#', '--hash='))):
-            yield row('PyPI', match[1], match[2], dev, private_index)
+            yield row('PyPI', match[1], match[2], dev, private_index, public)
         elif line.strip() and (line.lstrip().startswith('--editable') or
                               not line.lstrip().startswith(('#', '--', '-r', '-c', '-i', '-f'))):
             editable = r'^\s*(?:-e(?:\s+|=)?|--editable(?:\s+|=))'
@@ -157,6 +171,24 @@ def requirements(text, dev=False):
                 egg = re.search(r'#egg=([A-Za-z0-9][A-Za-z0-9._-]*)', value)
                 local_name = name[1] if name else egg[1] if egg else 'local-' + hashlib.sha256(value.encode()).hexdigest()[:12]
                 yield row('PyPI', local_name, None, dev, True)
+
+
+def pipfile(data):
+    sources = {s.get('name'): s.get('url') for s in data.get('_meta', {}).get('sources', []) if isinstance(s, dict)}
+    default_public = bool(sources) and all(public_registry(url, 'PyPI') for url in sources.values())
+    default_private = any(not public_registry(url, 'PyPI') for url in sources.values())
+    for group in ('default', 'develop'):
+        for name, package in data.get(group, {}).items():
+            if not isinstance(package, dict):
+                continue
+            public, private = default_public, default_private
+            index = package.get('index')
+            if index:
+                public = public_registry(sources.get(index), 'PyPI')
+                # A conventional index name without its URL is still only an assumption.
+                private = not public if index in sources else index != 'pypi'
+            private = private or bool(set(package) & {'git', 'path', 'file', 'ref', 'editable'})
+            yield row('PyPI', name, package.get('version', '')[2:], group == 'develop', private, public)
 
 
 def development(rows, prod, dev, graph):
@@ -293,16 +325,7 @@ def parse(filename, text, manifest=None):
         if name == 'package-lock.json':
             rows = npm_json(json.loads(text))
         elif name == 'Pipfile.lock':
-            data = json.loads(text)
-            sources = {s.get('name'): s.get('url') for s in data.get('_meta', {}).get('sources', []) if isinstance(s, dict)}
-            private_default = any(not public_registry(url, 'PyPI') for url in sources.values())
-            rows = (row('PyPI', n, p.get('version', '')[2:], group == 'develop')
-                    if not (set(p) & {'git', 'path', 'file', 'ref', 'editable'} or
-                            (not p.get('index') and private_default) or (p.get('index') and (p['index'] != 'pypi' or
-                             p['index'] in sources and not public_registry(sources[p['index']], 'PyPI'))))
-                    else row('PyPI', n, p.get('version', '')[2:], group == 'develop', True)
-                    for group in ('default', 'develop') for n, p in data.get(group, {}).items()
-                    if isinstance(p, dict))
+            rows = pipfile(json.loads(text))
         elif name == 'yarn.lock':
             rows = yarn(text)
         elif name == 'pnpm-lock.yaml':
@@ -313,7 +336,8 @@ def parse(filename, text, manifest=None):
             rows = requirements(text, 'dev' in name.lower())
         elif name == 'METADATA':
             fields = dict(re.findall(r'^(Name|Version):\s*([^\n\r]+)', re.split(r'\r?\n\r?\n', text, maxsplit=1)[0], re.M))
-            # Installed distributions are public unless local collection found source evidence.
+            # Installed names remain eligible unless private evidence was collected;
+            # METADATA alone does not confirm a public package source.
             private = bool(re.search(r'^PSR-Private: (?:direct|index)$', text, re.M))
             rows = [row('PyPI', fields.get('Name'), fields.get('Version'), private=private)]
         else:

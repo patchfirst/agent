@@ -5,5 +5,7 @@ RELEASE = re.compile(r"\d+(?:\.\d+)+(?:[a-z]+\d*)?|\d+", re.I)
 
 
 def extract(text):
-    m = RELEASE.search(text or "")
+    value = re.sub(r'^\d+:', '', text or "")
+    value = re.sub(r'(?<=\d)_[pP](?=\d)', 'p', value)
+    m = RELEASE.search(value)
     return m.group(0) if m else ""

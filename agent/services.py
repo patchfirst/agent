@@ -6,7 +6,15 @@ import re
 import catalog
 import version_text
 
-COLLECTION_FAILED = "сбор не удался"
+COLLECTION_FAILED = "collection failed"
+
+
+def error_marker(value):
+    """Only locale-independent collector status tokens can cross the wire."""
+    if isinstance(value, str) and len(value) <= 256 and re.fullmatch(
+            r'collection failed|ssh timeout [0-9]+ s|ssh exit code [0-9]+', value):
+        return value
+    return COLLECTION_FAILED if value else ''
 
 CATEGORIES = json.loads(pkgutil.get_data(__name__, "service_categories.json"))
 _PROGRAMS = [(category, re.compile(pattern, re.I))
@@ -122,7 +130,10 @@ def public_version(value):
     tokens = {token.lower() for token in re.split(r"[^0-9A-Za-z]+", value) if re.search(r"[A-Za-z]", token)}
     if all(_build_token(token) for token in tokens) and not _internal_address(value):
         return value
-    release = re.sub(r"(\d)[A-Za-z]{2,}\d*$", r"\1", version_text.extract(re.sub(r"^\d+:", "", value)))
+    # A numeric Python epoch is part of the release, not a standalone version.
+    python_release = re.match(r"\d+!\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?=$|[+_-])", value, re.I)
+    release = python_release[0] if python_release else re.sub(
+        r"(\d)[A-Za-z]{2,}\d*$", r"\1", version_text.extract(re.sub(r"^\d+:", "", value)))
     return "" if _internal_address(release) else release
 
 
@@ -189,8 +200,9 @@ def records(inv, normalize_program=None):
 OS_NAMES = {"debian": "Debian GNU/Linux", "ubuntu": "Ubuntu", "alpine": "Alpine Linux",
             "fedora": "Fedora Linux", "rhel": "Red Hat Enterprise Linux", "centos": "CentOS Linux",
             "rocky": "Rocky Linux", "almalinux": "AlmaLinux", "amzn": "Amazon Linux",
-            "arch": "Arch Linux", "gentoo": "Gentoo", "opensuse-leap": "openSUSE Leap",
+            "arch": "Arch Linux", "gentoo": "Gentoo", "opensuse": "openSUSE Leap", "opensuse-leap": "openSUSE Leap",
             "opensuse-tumbleweed": "openSUSE Tumbleweed", "sles": "SUSE Linux Enterprise Server",
+            "sled": "SUSE Linux Enterprise Server",  # Canonical wire id; variant retains Desktop identity.
             "freebsd": "FreeBSD", "flatcar": "Flatcar Container Linux", "bottlerocket": "Bottlerocket OS",
             "cos": "Container-Optimized OS from Google"}
 OS_CODENAMES = {"jessie", "stretch", "buster", "bullseye", "bookworm", "trixie", "forky", "duke",
@@ -209,6 +221,8 @@ def os_pretty(value):
 def os_metadata(value):
     """Rebuild presentation text from OS identities instead of arbitrary prose."""
     ident = value.get("id", "")
+    variant = "sled" if ident == "sled" or value.get("variant") == "sled" else ""
+    ident = {"opensuse": "opensuse-leap", "sled": "sles"}.get(ident, ident)
     ident = ident if ident in OS_NAMES else ""
     version = value.get("version_id", "")
     version = version if re.fullmatch(r"\d+(?:\.\d+)*", version) else ""
@@ -219,6 +233,8 @@ def os_metadata(value):
         pretty = " ".join(part for part in (OS_NAMES[ident], version) if part) if ident else ""
         if pretty and codename:
             pretty += " (" + codename + ")"
+    if variant:
+        return {"id": ident, "version_id": version, "pretty": "", "codename": codename, "variant": variant}
     return {"id": ident, "version_id": version, "pretty": pretty, "codename": codename}
 
 
@@ -254,17 +270,18 @@ SAFE_DISPLAY_KINDS = {'composer', 'npm', 'python', 'program', 'file'}
 
 INVENTORY_SCHEMA = {
     "safe_displays": [{key: str for key in ("label", "name", "kind", "project")}],
-    "kind": str, "os": {key: str for key in ("id", "version_id", "pretty", "codename")},
-    "kernel": str, "reboot_required": bool, "reboot_packages": [str], "package_manager": str,
-    "packages": [{key: str for key in ("name", "version", "source", "source_version", "origin", "modularitylabel")}],
+    "kind": str, "os": {key: str for key in ("id", "version_id", "pretty", "codename", "variant")},
+    "kernel": str, "kernel_update_available": bool, "reboot_required": bool, "reboot_packages": [str], "package_manager": str,
+    "packages": [{**{key: str for key in ("name", "version", "source", "source_version", "origin", "modularitylabel", "binary_scope")},
+                  "running_kernel": bool, "library": bool, "web_module": bool, "clean": bool}],
     "public_addr": bool, "tags": [str], "process_packages": {"*": str}, "processes": [(str, str)],
     "services": [{"program": str, "category": str, "bind": str, "public": bool, "reachable": bool}],
     "binaries": [{key: str for key in ("name", "path", "owner", "version")}],
     "containers_health": [{"image": str}], "docker": {"containers": [{"image": str}]},
     "apps": [{key: str for key in ("kind", "path", "version")}],
-    "composer": [{**{key: str for key in ("lock", "name", "version")}, "dev": bool}],
-    "deps": [{"eco": str, "lock": str, "name": str, "version": str, "dev": bool}],
-    "apache_php": [str], "error": str, "unlisted_packages": int,
+    "composer": [{**{key: str for key in ("lock", "name", "version")}, "dev": bool, "clean": bool}],
+    "deps": [{"eco": str, "lock": str, "name": str, "version": str, "dev": bool, "clean": bool}],
+    "apache_php": [str], "error": str, "unlisted_packages": int, "clean_packages": int,
     "images": [{"namespace": str, "image": str, "image_id": str, "workloads": [str], "public": bool}],
     "nodes": [{key: str for key in ("name", "osImage", "kernelVersion", "kubeletVersion", "containerRuntimeVersion")}],
     **{prefix + flag: bool for prefix in ("deps_scan_", "composer_scan_")
@@ -292,6 +309,8 @@ def valid_leaf(path, value, owned=None):
         if path[-1] == 'project':
             return bool(re.fullmatch(r'[1-9][0-9]{0,5}', value))
         return False
+    if path == ('os', 'variant'):
+        return value == 'sled'
     if path == ('packages', '*', 'origin'):
         return value in {'distro', 'third_party', 'unknown'}
     if path == ('packages', '*', 'modularitylabel'):
@@ -333,7 +352,7 @@ def valid_leaf(path, value, owned=None):
     if path == ("apache_php", "*"):
         return bool(re.fullmatch(r"(?:php[5-9](?:\.\d{1,2})?|mpm_(?:event|prefork|worker))", value))
     if path == ("error",):
-        return value == COLLECTION_FAILED
+        return value == error_marker(value)
     if path == ("images", "*", "image_id") or path == ("images", "*", "workloads", "*"):
         return False
     # These fields have their own bounded domain grammars (OS/package/image
@@ -368,10 +387,17 @@ def clean(value, schema=INVENTORY_SCHEMA, path=(), owned=None, program=None):
             value = program_name(value)
         elif path == ("binaries", "*", "version"):
             value = binary_version(value)
+        elif path[-1:] in {("version",), ("source_version",), ("kubeletVersion",)}:
+            value = public_version(value)
+        elif path == ("kernel",) or path[-1:] == ("kernelVersion",):
+            value = kernel_version(value)
+        elif path[-1:] == ("containerRuntimeVersion",):
+            runtime, separator, version = value.partition("://")
+            value = runtime + separator + public_version(version) if separator else ""
         elif path[-1:] == ("image",):
             value = normalize_image(value)
         elif path == ("error",) and value:
-            value = COLLECTION_FAILED
+            value = error_marker(value)
         limit = HEADLINE_LIMIT if path == ("os", "pretty") else LIMIT
         return value if len(value) <= limit and valid_leaf(path, value, owned) else ""
     if value is None and path in NULLABLE:

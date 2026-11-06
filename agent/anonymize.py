@@ -1,4 +1,4 @@
-"""Inventory → anonymized JSON for the API. Runs on the client; the server cannot identify the machine owner.
+"""Inventory to pseudonymized JSON for the API. Runs on the client; the server cannot identify the machine owner.
 
 Send only what vulnerability matching needs: OS, packages, versions, and public exposure flags.
 Port numbers are not sent. Replace addresses, names, paths, private images, and namespace/workload names with labels
@@ -13,9 +13,11 @@ import posixpath
 import re
 
 import dependency_locks
-import npm_scopes
 import catalog
+import public_package_names
 import services
+import package_rules
+from agent_messages import t
 from net import is_public_addr
 
 ALLOWED_TAGS = {"prod", "stage", "dev", "qa"}
@@ -24,11 +26,23 @@ FORBIDDEN_PATHS = ("/home/", "/var/www/", "/srv/", "/opt/", "/root/", "/data/", 
 
 
 class Leak(ValueError):
-    pass
+    def __init__(self, message):
+        super().__init__(t(message))
+
+
+_ACTIVE_NAMES = object()
 
 
 class Anonymizer:
-    def __init__(self, secret, identity_words=(), *, projects=None, safe_displays=True):
+    def __init__(self, secret, identity_words=(), *, projects=None, safe_displays=True, public_names=_ACTIVE_NAMES):
+        if public_names is _ACTIVE_NAMES:
+            self.public_names = public_package_names.current()
+        else:
+            self.public_names = None if public_names is None else {
+                eco: frozenset(public_package_names.canonical(eco, name) for name in names)
+                for eco, names in public_names.items()}
+        self.os_ecosystems = []
+        self.os_id = ''
         self.secret = secret.encode()
         self.words = [w.lower() for w in identity_words if w]
         self.labels = {}
@@ -70,22 +84,73 @@ class Anonymizer:
             return self.label("img", image)
         return normalized if services.image_reference(normalized) else self.label("img", image)
 
+    def listed(self, name, ecosystems):
+        return self.public_names is not None and any(
+            public_package_names.canonical(eco, name) in self.public_names.get(eco, ()) for eco in ecosystems)
+
+    def public_source(self, source):
+        normalized = package_rules.kernel_source(source)
+        if any(package_rules.is_kernel(source, eco) for eco in self.os_ecosystems) and self.listed(normalized, self.os_ecosystems):
+            return normalized
+        return source
+
+    def package_permissions(self, package):
+        name, source = package['name'], package['source']
+        strict_catalogue = bool(catalog.by_package(name) or (catalog.by_package(source) and catalog.known_words(name)))
+        return (self.listed(name, self.os_ecosystems) or strict_catalogue,
+                self.listed(self.public_source(source), self.os_ecosystems) or bool(strict_catalogue and catalog.by_package(source)))
+
     def package(self, p):
-        out = {k: p[k] for k in ("name", "version", "source", "source_version")}
-        if p.get("origin") in ("distro", "third_party", "unknown", "local"):
-            out["origin"] = "unknown" if p["origin"] == "local" else p["origin"]
-        if p.get("origin") in ("local", "third_party"):
-            # Kept for the catalogue only: the vendor's words survive, the owner's do not.
-            out.update(source=p["source"] if catalog.by_package(p["source"]) else p["name"],
-                       version=services.public_version(p["version"]),
-                       source_version=services.public_version(p["source_version"]))
-        label = p.get("modularitylabel", "")
-        if p.get("origin") == "distro" and re.fullmatch(r"[a-zA-Z0-9_.+-]+(?::[a-zA-Z0-9_.+-]+){3}", label) \
-                and not self.marked(label):
-            out["modularitylabel"] = label
-        if self.marked(p["name"]) or self.marked(p["source"]):
-            out.update(name=self.label("pkg", p["name"]), source=self.label("pkg", p["source"]))
+        named, sourced = self.package_permissions(p)
+        named = named and not self.marked(p['name'])
+        sourced = sourced and not self.marked(p['source'])
+        out = {'name': p['name'] if named else self.label('pkg', p['name']),
+               'version': services.public_version(p['version']) if named else '',
+               'source': self.public_source(p['source']) if sourced else self.label('pkg', p['source']),
+               'source_version': services.public_version(p['source_version']) if sourced else ''}
+        query_name = p['name'] if self.os_id in {'rocky', 'almalinux', 'rhel'} else self.public_source(p['source'])
+        if p.get('origin') == 'distro' and self.public_names is not None and self.os_ecosystems and not self.listed(query_name, self.os_ecosystems):
+            out['clean'] = True
+        if p.get('origin') in ('distro', 'third_party', 'unknown', 'local'):
+            out['origin'] = 'unknown' if p['origin'] == 'local' else p['origin']
+        for visible, hidden, permitted in (('version', p['source'], sourced),
+                                            ('source_version', p['name'], named)):
+            if not permitted and hidden.lower() in out[visible].lower():
+                out[visible] = services.public_version(out[visible])
+                if hidden.lower() in out[visible].lower():
+                    out[visible] = ''
+        label = p.get('modularitylabel', '')
+        if named and p.get('origin') == 'distro' and label and label != '(none)':
+            parts = label.split(':')
+            if len(parts) == 4 and re.fullmatch(r'\d+(?:\.\d+)*', parts[1]):
+                module = parts[0]
+                public = (self.listed(module, self.os_ecosystems) or catalog.by_package(module)) and not self.marked(module)
+                module = module if public else self.label('pkg', module)
+                out['modularitylabel'] = '%s:%s:0:0' % (module, parts[1])
+            else:
+                out['modularitylabel'] = 'unknown:unknown:0:0'
         return out
+
+    def package_context(self, package, sent, inv):
+        if not services.is_label(sent['name'], 'pkg'):
+            return
+        name = package['name']
+        scope = package_rules.binary_key(name).lower()
+        if self.listed(scope, self.os_ecosystems) and not self.marked(scope):
+            sent['binary_scope'] = scope
+        sent.update(running_kernel=self.relevant_package(package, inv), library=name.startswith('lib'))
+        enabled = inv.get('apache_php')
+        sent['web_module'] = name.startswith('libapache2-mod-php') and (
+            enabled is None or name[len('libapache2-mod-'):] in enabled)
+
+    def relevant_package(self, package, inv):
+        return package_rules.relevant_os_package(inv, package)
+
+    def kernel_update_available(self, inv):
+        running = package_rules.kernel_build('linux-image-' + inv.get('kernel', ''))
+        return running is not None and any(
+            build > running for package in inv.get('packages', [])
+            for build in [package_rules.kernel_build(package['name'])] if build is not None)
 
     def location(self, prefix, value, kind):
         label = self.label(prefix, value)
@@ -106,39 +171,55 @@ class Anonymizer:
                            'kind': kind, 'project': self.projects[folder]})
         return result
 
+    def dependency_label(self, ecosystem, name, version):
+        normalized = public_package_names.canonical(ecosystem, name)
+        version = version.lstrip('v') if ecosystem == 'Packagist' else version
+        label = self.label('pkg', '\0'.join((ecosystem, normalized, version)))
+        self.labels[label] = name
+        return label
+
     def dependency(self, package):
-        name = package["name"]
-        pattern = dependency_locks.NPM_NAME if package["eco"] == "npm" else dependency_locks.PYPI_NAME
-        private = package.get('private', False) or not pattern.fullmatch(name) or self.marked(name) or (
-            package["eco"] == "npm" and name.startswith("@") and
-            name.split("/", 1)[0] not in self.public_scopes())
-        out = {"eco": package["eco"], "lock": self.location("lock", package["lock"], "npm" if package["eco"] == "npm" else "python"),
-               "name": self.label("pkg", name) if private else name,
-               "version": services.public_version(package["version"])}
-        if "dev" in package:
-            out["dev"] = bool(package["dev"])
+        name, eco = package['name'], package['eco']
+        pattern = dependency_locks.NPM_NAME if eco == 'npm' else dependency_locks.PYPI_NAME
+        valid = bool(pattern.fullmatch(name)) and not self.marked(name)
+        # Listed identities are already public, even when this installed copy
+        # comes from a private source. Source proof governs clean counts only.
+        named = valid and self.listed(name, [eco])
+        out = {'eco': eco, 'lock': self.location('lock', package['lock'], 'npm' if eco == 'npm' else 'python'),
+               'name': name if named else self.dependency_label(eco, name, package['version']),
+               'version': services.public_version(package['version']) if named else ''}
+        if valid and not package.get('private') and package.get('public') is True and self.public_names is not None and not named:
+            out['clean'] = True
+        if 'dev' in package:
+            out['dev'] = bool(package['dev'])
         return out
 
-    def unlisted(self, p):
-        """Outside the distribution and the catalogue: nothing checks it, and the name may name the owner.
-
-        A binary of a catalogue source stays only if every word of its name is known: plugins and extras
-        (docker-buildx-plugin from docker-ce) carry their own versions and must not pose as the product.
-        """
-        return p.get("origin") in ("local", "third_party") and not (
-            catalog.by_package(p["name"]) or (catalog.by_package(p["source"]) and catalog.known_words(p["name"])))
+    def unlisted(self, package):
+        """The catalogue exception keeps the strict whole-name rule for plugins and extras."""
+        return not any(self.package_permissions(package))
 
     def composer(self, c):
-        public = c.get("public") and not self.marked(c["name"]) and re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", c["name"], re.I)
-        return {"lock": self.location("lock", c["lock"], "composer"),
-                "name": c["name"].lower() if public else self.label("pkg", c["name"]),
-                "version": services.public_version(c["version"]), "dev": bool(c.get("dev"))}
+        valid = not self.marked(c['name']) and re.fullmatch(r'[a-z0-9_.-]+/[a-z0-9_.-]+', c['name'], re.I)
+        named = valid and self.listed(c['name'], ['Packagist'])
+        out = {'lock': self.location('lock', c['lock'], 'composer'),
+               'name': c['name'].lower() if named else self.dependency_label('Packagist', c['name'], c['version']),
+               'version': services.public_version(c['version']) if named else '', 'dev': bool(c.get('dev'))}
+        if valid and c.get('public') is True and self.public_names is not None and not named:
+            out['clean'] = True
+        return out
 
     def host(self, inv):
         if self.marked(inv.get("os", {}).get("pretty", "")):
             raise Leak("OS description still contains an owner identity word; refusing to send")
+        self.os_ecosystems = package_rules.ecosystems(services.os_metadata(inv.get('os', {})))
+        self.os_id = inv.get('os', {}).get('id', '')
         packages = [p for p in inv.get("packages", []) if not self.unlisted(p)]
+        dropped = {(p['name'], p['version']): p for p in inv.get('packages', [])
+                   if self.unlisted(p) and self.relevant_package(p, inv)}
+        clean = sum(p.get('origin') == 'distro' for p in dropped.values()) if self.public_names is not None and self.os_ecosystems else 0
         sent_packages = [self.package(p) for p in packages]
+        for original, sent in zip(packages, sent_packages):
+            self.package_context(original, sent, inv)
         renamed = {p["name"]: sent["name"] for p, sent in zip(packages, sent_packages)}
         names = set(renamed)
         listeners = services.records(inv, normalize_program=self.program)
@@ -155,7 +236,9 @@ class Anonymizer:
             "reboot_packages": [renamed[p] for p in inv.get("reboot_packages", []) if p in names and not self.marked(p)],
             "package_manager": inv.get("package_manager", ""),
             "packages": sent_packages,
-            "unlisted_packages": len(inv.get("packages", [])) - len(packages),
+            "unlisted_packages": len(dropped) - clean,
+            "clean_packages": clean,
+            "kernel_update_available": self.kernel_update_available(inv),
             "public_addr": is_public_addr(inv.get("addr", "")),
             "tags": [t for t in inv.get("tags", []) if t in ALLOWED_TAGS],
             "services": listeners,
@@ -164,7 +247,9 @@ class Anonymizer:
                           for comm, exe in inv.get("processes", []) if comm in programs or exe in raw],
             "binaries": [{"name": self.program(b["name"]), "path": self.label("path", b["path"]),
                           "owner": renamed.get(b.get("owner", "-"), "-" if b.get("owner", "-") == "-" else self.label("pkg", b["owner"])),
-                          "version": services.binary_version(b.get("version", ""))} for b in inv.get("binaries", [])],
+                          "version": services.binary_version(b.get("version", "")) if b.get('owner', '-') == '-' or (
+                              b.get('owner') in renamed and not services.is_label(renamed[b['owner']], 'pkg')) else ''}
+                         for b in inv.get("binaries", [])],
             "containers_health": [{"image": self.image(c["image"])} for c in inv.get("containers_health", [])],
             "docker": {"containers": [{"image": self.image(c["image"])}
                                       for c in inv["docker"].get("containers", [])]} if inv.get("docker") else None,
@@ -181,14 +266,11 @@ class Anonymizer:
             "apache_php": inv.get("apache_php"),
         }
         if inv.get("error"):
-            out["error"] = services.COLLECTION_FAILED
+            out["error"] = services.error_marker(inv["error"])
         return out
 
     def inventory(self, inv):
         return self.host(inv)
-
-    def public_scopes(self):
-        return npm_scopes.public_scopes()
 
     def payload(self, inv):
         data = self.inventory(inv)
@@ -237,4 +319,4 @@ class Anonymizer:
         found = [s for s in secrets if s in text] + [p for p in FORBIDDEN_PATHS if p in text]
         found += [w for w in self.words if w in low]
         if found:
-            raise Leak("anonymized JSON still contains: %s; refusing to send" % ", ".join(sorted(set(found))))
+            raise Leak(t("anonymized JSON still contains: {values}; refusing to send", values=", ".join(sorted(set(found)))))
