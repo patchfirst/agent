@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import queue
 import re
-import ssl
 import sys
 import tempfile
 import threading
@@ -19,7 +18,7 @@ import urllib.request
 import zlib
 
 from agent_messages import t
-from net import origin
+from net import same_origin_opener
 from package_rules import ecosystems
 
 DEFAULT_API = 'https://patchfirst.dev'
@@ -245,6 +244,11 @@ def read_response(response, deadline, target):
         digest.update(part)
 
 
+def open_list(request, timeout, cafile=None):
+    """A redirect to another origin is refused before any request reaches it."""
+    return same_origin_opener(cafile).open(request, timeout=timeout)
+
+
 def download(url, headers, cafile, deadline, directory):
     """Bound DNS/TLS/body together; abandoned workers never publish their temporary file."""
     result, cancelled = queue.Queue(maxsize=1), threading.Event()
@@ -258,14 +262,11 @@ def download(url, headers, cafile, deadline, directory):
         success = False
         try:
             with os.fdopen(fd, 'wb') as target:
-                context = ssl.create_default_context(cafile=cafile) if cafile else None
                 req = urllib.request.Request(url, headers=headers, method='GET')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError('public package-name download timed out')
-                with urllib.request.urlopen(req, timeout=remaining, context=context) as response:
-                    if origin(getattr(response, 'geturl', lambda: url)()) != origin(url):
-                        raise OSError('public package-name list redirected to another origin')
+                with open_list(req, timeout=remaining, cafile=cafile) as response:
                     digest = read_response(response, deadline, target)
                     etag = content_etag(response.headers.get('ETag', ''), digest)
             if not cancelled.is_set():

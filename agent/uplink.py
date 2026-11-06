@@ -7,7 +7,7 @@ import anonymize
 from agent_messages import t
 from net import UA, http
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 USER_AGENT = "%s patchfirst/%s" % (UA, VERSION)
 
 

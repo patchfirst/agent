@@ -28,7 +28,7 @@ except NameError:
 configure()
 
 # Same as uplink.USER_AGENT: the installer runs separately from the agent package.
-UA = 'psr/1.0 (+security inventory) patchfirst/1.2.1'
+UA = 'psr/1.0 (+security inventory) patchfirst/1.2.2'
 
 
 def canonical_config(config):
