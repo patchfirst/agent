@@ -210,11 +210,13 @@ class Anonymizer:
 
     def composer(self, c):
         valid = not self.marked(c['name']) and re.fullmatch(r'[a-z0-9_.-]+/[a-z0-9_.-]+', c['name'], re.I)
-        named = valid and self.sendable(c['name'], 'Packagist', c)
+        version = services.public_version(c['version'])
+        listed = valid and self.sendable(c['name'], 'Packagist', c)
+        named = listed and bool(version)
         out = {'lock': self.location('lock', c['lock'], 'composer'),
                'name': c['name'].lower() if named else self.dependency_label('Packagist', c['name'], c['version']),
-               'version': services.public_version(c['version']) if named else '', 'dev': bool(c.get('dev'))}
-        if valid and c.get('public') is True and self.public_names is not None and not named:
+               'version': version if named else '', 'dev': bool(c.get('dev'))}
+        if valid and c.get('public') is True and self.public_names is not None and not listed:
             out['clean'] = True
         return out
 

@@ -38,7 +38,7 @@ Like any HTTPS request, the connection shows your IP address (or your NAT, VPN o
 
 - Packages that have never had a vulnerability entry are omitted from the dashboard unless they match the catalogue. A vulnerability for a new package name is detected after the next list refresh and agent run (normally within the 6-hour collection interval).
 - The list proves that a name occurs in the vulnerability database; it does not prove where your installed copy came from. A private package whose name happens to match a listed public package can therefore leave by that public name.
-- Versions keep only the words vendors and distributions use (`-1ubuntu0.1`, `-bookworm`, `.el9`); any other suffix and any internal address leave only the upstream release; when no public release remains (for example, a version that looks like an internal address), an npm or PyPI dependency leaves as a label.
+- Versions keep only the words vendors and distributions use (`-1ubuntu0.1`, `-bookworm`, `.el9`); any other suffix and any internal address leave only the upstream release; when no public release remains (for example, a version that looks like an internal address), an npm, PyPI or Composer dependency leaves as a label.
 - Values the agent cannot classify are replaced with labels; anything that matches your identity words is replaced as well. Keep `identity_words` filled in.
 
 ## See for yourself
