@@ -411,6 +411,29 @@ done'
   rm -rf "$scan_dir"
 }
 
+docker_scan() {
+  sec docker
+  has docker || return 0
+  docker_limit=
+  # BusyBox before 1.30 spells it `timeout -t N`; run unbounded there rather than misreport Docker.
+  ! timeout 10 true >/dev/null 2>&1 || docker_limit='timeout 30'
+  if $docker_limit docker info >/dev/null 2>&1; then
+    if docker_rows=$($docker_limit docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null); then
+      docker_images=$(printf '%s\n' "$docker_rows" | cut -f1 | xargs -r $docker_limit docker inspect --format '{{.Id}}{{"\t"}}{{.Image}}' 2>/dev/null)
+      { printf '%s\n' "$docker_images"; echo @; printf '%s\n' "$docker_rows"; } | awk -F'\t' '
+        !rows { if ($0 == "@") rows = 1; else image[$1] = $2; next }
+        $3 != "" { print $2 "\t" $3 "\t" image[$1] "\t" $4 }'
+      sec images
+      printf '%s\n' "$docker_images" | cut -f2 | sort -u | xargs -r $docker_limit docker image inspect --format '{{.Id}}{{"\t"}}{{range $i, $v := .RepoTags}}{{if $i}},{{end}}{{$v}}{{end}}{{"\t"}}{{range $i, $v := .RepoDigests}}{{if $i}},{{end}}{{$v}}{{end}}{{"\t"}}{{.Created}}' 2>/dev/null
+      return 0
+    fi
+  elif [ ! -S /var/run/docker.sock ]; then
+    return 0
+  fi
+  sec docker_scan
+  echo skipped
+}
+
 sec os
 cat /etc/os-release 2>/dev/null
 
@@ -484,12 +507,7 @@ for b in php php-fpm nginx apache2 httpd haproxy mysqld mariadbd redis-server va
   printf '%s\t%s\t%s\t%s\n' "$b" "$real" "$owner" "$v"
 done
 
-sec docker
-if has docker && timeout 10 docker info >/dev/null 2>&1; then
-  docker ps --no-trunc --format '{{.Names}}\t{{.Image}}\t{{.ImageID}}\t{{.Ports}}' 2>/dev/null
-  sec images
-  docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null | sort -u | xargs -r docker image inspect --format '{{.Id}}\t{{join .RepoTags ","}}\t{{join .RepoDigests ","}}\t{{.Created}}' 2>/dev/null
-fi
+docker_scan
 
 sec apps
 for f in /var/www/*/version.php /var/www/*/*/version.php /srv/*/version.php; do

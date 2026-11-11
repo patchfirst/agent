@@ -259,6 +259,7 @@ def parse(text, marker=None):
         "process_packages": procpkg,
         "binaries": [dict(zip(("name", "path", "owner", "version"), row)) for row in tsv(sec.get("bins", []), 4)],
         "docker": docker,
+        "docker_scan_skipped": "skipped" in sec.get("docker_scan", []),
         "apps": apps,
         "composer_scan_limited": "limited" in sec.get("composer_scan", []),
         "composer_scan_timeout": "timeout" in sec.get("composer_scan", []),

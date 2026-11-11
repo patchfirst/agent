@@ -279,6 +279,8 @@ class Anonymizer:
         }
         if inv.get("error"):
             out["error"] = services.error_marker(inv["error"])
+        if inv.get("docker_scan_skipped"):
+            out["docker_scan_skipped"] = True
         return out
 
     def inventory(self, inv):

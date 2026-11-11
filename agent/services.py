@@ -281,7 +281,7 @@ INVENTORY_SCHEMA = {
     "apps": [{key: str for key in ("kind", "path", "version")}],
     "composer": [{**{key: str for key in ("lock", "name", "version")}, "dev": bool, "clean": bool}],
     "deps": [{"eco": str, "lock": str, "name": str, "version": str, "dev": bool, "clean": bool}],
-    "apache_php": [str], "error": str, "unlisted_packages": int, "clean_packages": int,
+    "apache_php": [str], "error": str, "unlisted_packages": int, "clean_packages": int, "docker_scan_skipped": bool,
     "images": [{"namespace": str, "image": str, "image_id": str, "workloads": [str], "public": bool}],
     "nodes": [{key: str for key in ("name", "osImage", "kernelVersion", "kubeletVersion", "containerRuntimeVersion")}],
     **{prefix + flag: bool for prefix in ("deps_scan_", "composer_scan_")
