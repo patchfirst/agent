@@ -2,6 +2,23 @@
 export LC_ALL=C PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 sec() { printf '\n@@%s%s\n' "${PSR_SECTION:+$PSR_SECTION:}" "$1"; }
 has() { command -v "$1" >/dev/null 2>&1; }
+# Files under owners' directories are read only through head_of or bounded: a FIFO, /dev/zero,
+# /proc/kmsg or a sparse terabyte must neither hang nor exhaust the root agent.
+read_deadline=
+if timeout 5 true >/dev/null 2>&1; then read_deadline='timeout 5'
+elif timeout -t 5 true >/dev/null 2>&1; then read_deadline='timeout -t 5'; fi
+# The first bytes of a regular non-empty file (procfs reports size 0; sysfs and devices are never read).
+head_of() {
+  [ -f "$1" ] && [ -s "$1" ] && [ -r "$1" ] || return 1
+  case "$(readlink -f "$1" 2>/dev/null)" in /proc/*|/sys/*|/dev/*) return 2 ;; esac
+  $read_deadline head -c "$2" "$1" 2>/dev/null
+}
+# A whole file: 1 when absent or unreadable, 2 when larger than the limit (callers flag or assume private).
+bounded() {
+  [ -f "$1" ] && [ -s "$1" ] && [ -r "$1" ] || return 1
+  [ "$(stat -L -c %s "$1" 2>/dev/null)" -le "$2" ] 2>/dev/null || return 2
+  head_of "$1" "$2"
+}
 t() { timeout 10 "$@" 2>&1 | head -3; }
 
 rpm_packages() {
@@ -39,7 +56,7 @@ apt_origin_parse() {
       if (origin=="distro") distro=1
       if (origin=="third_party") third=1
     }
-    END {emit()}' "$1" "$2"
+    END {emit()}' "$1" "$2"  # agent-written apt-cache output
 }
 
 apt_package_origins() {
@@ -92,11 +109,18 @@ composer_paths() {
 }
 
 composer_read() {
+  composer_bytes=0
   head -n 100 | while IFS= read -r f; do
     [ -f "$f" ] || continue
+    # The locks share one 16 MB budget, as dependency files do: a hundred planted 8 MB locks cannot stall the scan.
+    composer_bytes=$((composer_bytes + $(stat -L -c %s "$f" 2>/dev/null || echo 0)))
+    [ "$composer_bytes" -le 16777216 ] || { [ -z "$scan_dir" ] || echo skipped >>"$scan_dir/skipped"; break; }
     # Walk the JSON: packages are the objects of the "packages"/"packages-dev" arrays.
     # Packagist marks its packages with its download notification URL; anything else is a private repository.
-    awk -v f="$f" '
+    composer_lock=$(bounded "$f" 8388608) || { [ -z "$scan_dir" ] || echo skipped >>"$scan_dir/skipped"; continue; }
+    # BusyBox awk is quadratic in the record length: a one-line lock is cut into 4 KB records.
+    # The walk below is per character, so its state carries across the cuts.
+    printf '%s\n' "$composer_lock" | if has fold; then fold -b -w 4096; else cat; fi | awk -v f="$f" '
       function flush() {
         if (name != "" && version != "") {
           print "composer\t" f "\t" name "\t" version "\t" dev
@@ -116,9 +140,10 @@ composer_read() {
         for (i = 1; i <= n; i++) {
           c = substr($0, i, 1)
           if (instring) {
-            if (escaped) { escaped = 0; text = text c; continue }
+            # mawk copies the string on every append: a cap keeps a megabyte string linear.
+            if (escaped) { escaped = 0; if (length(text) < 4096) text = text c; continue }
             if (c == "\\") { escaped = 1; continue }
-            if (c != "\"") { text = text c; continue }
+            if (c != "\"") { if (length(text) < 4096) text = text c; continue }
             instring = 0
             if (expectkey) key[depth] = text; else scalar(text)
             continue
@@ -136,18 +161,19 @@ composer_read() {
           if (c == ",") { expectkey = (kind[depth] == "o"); continue }
           if (c == ":") { expectkey = 0; continue }
         }
-      }' "$f"
+      }'
   done
 }
 
+# An oversized or unreadable-in-time configuration proves nothing public: it reads as a private index.
 pip_index_config() {
-  [ -r "$1" ] || return
-  awk '
+  pip_config=$(bounded "$1" 65536) || { [ "$?" -eq 1 ] || echo unknown://oversized; return; }
+  printf '%s\n' "$pip_config" | awk '
     /^[[:space:]]*[#;]/ {next}
     /^[[:space:]]*\[/ {section=tolower($0); next}
     section ~ /^\[(global|install)\]/ && /^[[:space:]]*index[-_]url[[:space:]]*=/ {
       sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print
-    }' "$1"
+    }'
 }
 
 pip_primary_private() {
@@ -180,9 +206,10 @@ pip_primary_private() {
 # Registry files may contain authentication tokens. Read them only on the host;
 # the collection protocol carries scope + privacy, never their contents or URLs.
 npm_registry_config() {
-  [ -r "$1" ] || return 0
+  # An unread configuration may hold any scope: no later file can prove the default registry public again.
+  npm_config=$(bounded "$1" 65536) || { [ "$?" -eq 1 ] || printf '*\tunknown\n'; return 0; }
   case "$1" in *.yarnrc|*.yarnrc.yml) yarn_registry=1 ;; *) yarn_registry=0 ;; esac
-  awk -v yarn="$yarn_registry" '
+  printf '%s\n' "$npm_config" | awk -v yarn="$yarn_registry" '
   function trim(s) {sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s}
   function decision(scope, value) {
     value=trim(value); gsub(/^["\047]|["\047]$/, "", value)
@@ -210,7 +237,7 @@ npm_registry_config() {
       scope="*"; if (key ~ /^@/) {scope=key; sub(/:registry$/, "", scope)}
       decision(tolower(scope), value)
     }
-  }' "$1"
+  }'
 }
 
 npm_registry_flags() {
@@ -264,7 +291,92 @@ $npm_ancestors"
         public=(value ~ /^https:\/\/registry[.]npmjs[.]org(:443)?(\/|$)/)
         print scope "\t" (public ? "public" : "private")
       }'
-  } | awk -F '\t' -v lock="$npm_lock" '{rules[$1]=$2} END {for (scope in rules) print lock "\t" scope "\t" rules[scope]}'
+  } | awk -F '\t' -v lock="$npm_lock" '
+    $2 == "unknown" { unknown = 1; next }
+    { rules[$1] = $2 }
+    END {
+      if (unknown) { for (scope in rules) rules[scope] = "private"; rules["*"] = "private" }
+      for (scope in rules) print lock "\t" scope "\t" rules[scope]
+    }'
+}
+
+# Gem homes outside the project roots; distro-owned gem directories are checked as OS packages.
+GEM_HOMES='/var/lib/gems/*/specifications
+/usr/local/lib/ruby/gems/*/specifications
+/usr/local/bundle/specifications
+/home/*/.gem/ruby/*/specifications
+/home/*/.local/share/gem/ruby/*/specifications
+/home/*/.rbenv/versions/*/lib/ruby/gems/*/specifications
+/home/*/.rvm/gems/*/specifications
+/home/*/.rvm/rubies/*/lib/ruby/gems/*/specifications
+/usr/local/rbenv/versions/*/lib/ruby/gems/*/specifications
+/usr/local/rvm/gems/*/specifications
+/usr/local/rvm/rubies/*/lib/ruby/gems/*/specifications
+/opt/rbenv/versions/*/lib/ruby/gems/*/specifications'
+
+# Gemfile.lock paths in; candidate gem homes out: the system ones, vendor/bundle and the configured BUNDLE_PATH.
+gem_homes() {
+  for d in $GEM_HOMES; do
+    [ -d "$d" ] && printf '%s\n' "$d"
+  done
+  while IFS= read -r f; do
+    gem_app=${f%/*}
+    bundle_path=$(head_of "$gem_app/.bundle/config" 65536 | sed -n 's/^BUNDLE_PATH:[ \t]*"\{0,1\}\([^"]*\)"\{0,1\}[ \t\r]*$/\1/p' | head -n 1)
+    case "$bundle_path" in ''|/*) ;; *) bundle_path=$gem_app/$bundle_path ;; esac
+    for d in "$gem_app"/vendor/bundle/ruby/*/specifications ${bundle_path:+"$bundle_path"/ruby/*/specifications}; do
+      [ -d "$d" ] && printf '%s\n' "$d"
+    done
+  done
+}
+
+# Candidates in; real gem homes out. A link to a directory of another name is not a gem home.
+gem_resolve() {
+  while IFS= read -r d; do
+    case "$d" in *"$(printf '\t')"*|*'\'*|'') echo skipped >>"$scan_dir/skipped"; continue ;; esac
+    real=$(readlink -f "$d") || continue
+    case "$real" in */specifications) [ -d "${real%/specifications}/gems" ] && printf '%s\n' "$real" ;; esac
+  done
+}
+
+# Installed specifications of each gem home, default gems included.
+gem_specs() {
+  count=0
+  while IFS= read -r home; do
+    count=$((count + 1))
+    [ "$count" -le 100 ] || { echo limited >>"$scan_dir/deps_flags"; break; }
+    for dir in "$home" "$home/default"; do
+      [ -d "$dir" ] || continue
+      # A directory with a million entries is listed only up to the limit, never globbed whole.
+      specs=0
+      $read_deadline find "$dir" -maxdepth 1 -name '*.gemspec' -type f 2>/dev/null | head -n 1001 | while IFS= read -r f; do
+        # A name with a newline splits into fragments outside this directory: they are dropped.
+        case "${f#"$dir"/}" in */*|"$f") continue ;; esac
+        case "$f" in *"$(printf '\t')"*|*'\'*) echo skipped >>"$scan_dir/skipped"; continue ;; esac
+        specs=$((specs + 1))
+        [ "$specs" -le 1000 ] || { echo limited >>"$scan_dir/deps_flags"; break; }
+        printf '%s\n' "$f"
+      done
+    done
+  done
+}
+
+# A Bundler mirror serves rubygems.org from another host while the lock still names rubygems.org.
+bundler_mirror() {
+  gem_owner_home=$(awk -F: -v uid="$(stat -c %u "$1" 2>/dev/null)" '$3==uid {print $6; exit}' /etc/passwd 2>/dev/null)
+  env | grep -q '^BUNDLE_MIRROR__' && return 0
+  for config in "${1%/*}/.bundle/config" ${gem_owner_home:+"$gem_owner_home/.bundle/config"} /root/.bundle/config \
+    ${HOME:+"$HOME/.bundle/config"} /usr/local/bundle/config; do
+    gem_config=$(bounded "$config" 65536) || { [ "$?" -eq 1 ] && continue; return 0; }
+    printf '%s\n' "$gem_config" | grep -q '^BUNDLE_MIRROR__' && return 0
+  done
+  return 1
+}
+
+# A lock file over 2 MB is flagged limited; one that is not a regular file or times out, skipped.
+lock_read() {
+  bounded "$1" 2097152 >"$scan_dir/deps_content" && return 0
+  case "$?" in 2) echo limited ;; *) echo skipped ;; esac >>"$scan_dir/deps_flags"
+  return 1
 }
 
 deps_read() {
@@ -282,10 +394,10 @@ deps_read() {
     case "$f" in
       */METADATA)
         # The description after the headers may contain arbitrary Name:/Version: entries.
-        awk '/^\r?$/{exit} /^Name: |^Version: /{sub(/\r$/, ""); print}' "$f" >"$scan_dir/deps_content"
+        head_of "$f" 65536 | awk '/^\r?$/{exit} /^Name: |^Version: /{sub(/\r$/, ""); print}' >"$scan_dir/deps_content"
         # PEP 610 is inspected locally; paths, repository names and credentials stay here.
         direct=${f%/*}/direct_url.json
-        if [ -r "$direct" ] && head -c 65536 "$direct" | tr '\n\r' '  ' | \
+        if head_of "$direct" 65536 | tr '\n\r' '  ' | \
           grep -Eq '"url"[[:space:]]*:[[:space:]]*"file:|"vcs_info"[[:space:]]*:|"editable"[[:space:]]*:[[:space:]]*true'; then
           printf 'PSR-Private: direct\n' >>"$scan_dir/deps_content"
         fi
@@ -296,15 +408,31 @@ deps_read() {
           pip_primary_private "$f" && pip_cached_private=1
         fi
         [ -z "$pip_cached_private" ] || printf 'PSR-Private: index\n' >>"$scan_dir/deps_content"
-        source_file=$scan_dir/deps_content
-        size=$(wc -c <"$source_file") ;;
-      *) source_file=$f; size=$(wc -c <"$f") ;;
+        ;;
+      */specifications/*.gemspec|*/specifications/default/*.gemspec)
+        [ ! -L "$f" ] || { echo skipped >>"$scan_dir/deps_flags"; continue; }
+        # A specification is Ruby code with authors, e-mails and URLs: only the name and version leave the host.
+        head_of "$f" 65536 | awk '
+          /^# stub: / { if (NF >= 4) { print "Name: " $3; print "Version: " $4; stub = 1; exit } }
+          /^[ \t]*s\.name[ \t]*=[ \t]*"/ { name = $0; sub(/^[^"]*"/, "", name); sub(/".*/, "", name) }
+          /^[ \t]*s\.version[ \t]*=[ \t]*"/ { version = $0; sub(/^[^"]*"/, "", version); sub(/".*/, "", version) }
+          END { if (!stub && name != "" && version != "") { print "Name: " name; print "Version: " version } }
+        ' >"$scan_dir/deps_content"
+        ;;
+      */Gemfile.lock)
+        lock_read "$f" || continue
+        ! bundler_mirror "$f" || printf '\nPSR-Private: mirror\n' >>"$scan_dir/deps_content"
+        ;;
+      *)
+        lock_read "$f" || continue
+        ;;
     esac
+    size=$(wc -c <"$scan_dir/deps_content")
     if [ "$size" -gt 2097152 ] || [ "$((bytes + size))" -gt 16777216 ]; then
       echo limited >>"$scan_dir/deps_flags"
       continue
     fi
-    encoded=$(base64 <"$source_file" | tr -d '\n')
+    encoded=$(base64 <"$scan_dir/deps_content" | tr -d '\n')
     bytes=$((bytes + size))
     printf '%s\t%s\n' "$f" "$encoded"
   done
@@ -341,10 +469,12 @@ for path do
 "*) echo skipped >>"$flags" ;; *) printf "%s\n" "$path" ;; esac
 done'
   set -- find -H "$@" -xdev -maxdepth 6 \( \
-    -type d \( -name vendor -o -name node_modules -o -name .git -o -name .vscode-server -o -name .cursor-server \) -prune \) -o \( \
-    \( -type d \( -name .venv -o -name venv -o -name site-packages \) -prune \) -o \( \
+    -type d \( -name vendor -o -name node_modules -o -name .git -o -name .vscode-server -o -name .cursor-server \
+    -o -path '*/bundler/gems' -o \( -name gems -exec sh -c '[ -d "$1/../specifications" ]' sh {} \; \) \) -prune \) -o \( \
+    \( -type d \( -name .venv -o -name venv -o -name site-packages \
+    -o \( -name specifications -exec sh -c '[ -d "$1/../gems" ]' sh {} \; \) \) -prune \) -o \( \
     -type f \( -name composer.lock -o -name package-lock.json -o -name package.json -o -name yarn.lock -o -name pnpm-lock.yaml \
-    -o -name poetry.lock -o -name Pipfile.lock -o -name uv.lock -o -name 'requirements*.txt' \) \) \) \
+    -o -name poetry.lock -o -name Pipfile.lock -o -name uv.lock -o -name 'requirements*.txt' -o -name Gemfile.lock \) \) \) \
     -exec sh -c "$safe_find_paths" sh "$scan_dir/skipped" {} +
   if has timeout; then
     set -- timeout "${COMPOSER_SCAN_SECONDS:-15}" "$@"
@@ -358,10 +488,13 @@ done'
   : >"$scan_dir/deps"
   : >"$scan_dir/manifests"
   : >"$scan_dir/envs"
+  : >"$scan_dir/gem_homes"
+  : >"$scan_dir/gem_found"
   while IFS= read -r f; do
     case "$f" in
       */composer.lock) printf '%s\n' "$f" >>"$scan_dir/locks" ;;
       */package.json) printf '%s\n' "$f" >>"$scan_dir/manifests" ;;
+      */specifications) printf '%s\n' "$f" >>"$scan_dir/gem_found" ;;
       *) if [ -d "$f" ]; then printf '%s\n' "$f" >>"$scan_dir/envs"; else printf '%s\n' "$f" >>"$scan_dir/deps"; fi ;;
     esac
   done <"$scan_dir/paths"
@@ -400,6 +533,11 @@ done'
     head -n 1001 "$scan_dir/metadata" | composer_paths >>"$scan_dir/deps_read"
     [ "$(wc -l <"$scan_dir/metadata")" -le 1000 ] || echo limited >>"$scan_dir/deps_flags"
   done <"$scan_dir/envs"
+  # System homes and the apps' bundles come first: gem homes planted under /home cannot push them past the limit.
+  grep '/Gemfile\.lock$' "$scan_dir/deps" | head -n 100 | gem_homes >>"$scan_dir/gem_homes"
+  cat "$scan_dir/gem_found" >>"$scan_dir/gem_homes"
+  [ "$(wc -l <"$scan_dir/gem_homes")" -le 200 ] || echo limited >>"$scan_dir/deps_flags"
+  head -n 200 "$scan_dir/gem_homes" | gem_resolve | sort -u | gem_specs >>"$scan_dir/deps_read"
   sec deps_files
   deps_read <"$scan_dir/deps_read"
   sec deps_registry
@@ -511,10 +649,11 @@ docker_scan
 
 sec apps
 for f in /var/www/*/version.php /var/www/*/*/version.php /srv/*/version.php; do
-  [ -r "$f" ] && grep -q OC_VersionString "$f" && printf 'nextcloud\t%s\t%s\n' "$f" "$(sed -n "s/.*OC_VersionString = '\([^']*\)'.*/\1/p" "$f")"
+  v=$(head_of "$f" 65536 | sed -n "s/.*OC_VersionString = '\([^']*\)'.*/\1/p")
+  [ -z "$v" ] || printf 'nextcloud\t%s\t%s\n' "$f" "$v"
 done
 for f in /home/bitrix/www/bitrix/modules/main/classes/general/version.php /var/www/*/bitrix/modules/main/classes/general/version.php; do
-  [ -r "$f" ] && printf 'bitrix\t%s\t%s\n' "$f" "$(sed -n 's/.*"SM_VERSION", *"\([^"]*\)".*/\1/p' "$f")"
+  [ -f "$f" ] && printf 'bitrix\t%s\t%s\n' "$f" "$(head_of "$f" 65536 | sed -n 's/.*"SM_VERSION", *"\([^"]*\)".*/\1/p')"
 done
 set --
 for root in /var/www /srv /opt /home /data /app /usr/share/nginx /usr/local/www /www; do

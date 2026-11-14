@@ -264,9 +264,11 @@ def image_reference(value):
 # Safe display names are technical catalogue identities, never owner filenames.
 SAFE_FILE_NAMES = {'composer.lock', 'package-lock.json', 'npm-shrinkwrap.json',
                    'yarn.lock', 'pnpm-lock.yaml', 'requirements.txt', 'Pipfile.lock',
-                   'poetry.lock', 'uv.lock', 'pyproject.toml'}
+                   'poetry.lock', 'uv.lock', 'pyproject.toml', 'Gemfile.lock'}
 SAFE_DISPLAY_NAMES = SAFE_FILE_NAMES | PROGRAM_NAMES | APP_NAMES
-SAFE_DISPLAY_KINDS = {'composer', 'npm', 'python', 'program', 'file'}
+SAFE_DISPLAY_KINDS = {'composer', 'npm', 'python', 'ruby', 'program', 'file'}
+# Ecosystems of inventory deps rows and the safe display kind of their lock files.
+DEPENDENCY_KINDS = {'npm': 'npm', 'PyPI': 'python', 'RubyGems': 'ruby'}
 
 INVENTORY_SCHEMA = {
     "safe_displays": [{key: str for key in ("label", "name", "kind", "project")}],
@@ -342,7 +344,7 @@ def valid_leaf(path, value, owned=None):
     if path == ("nodes", "*", "name"):
         return is_label(value, "node")
     if path == ("deps", "*", "eco"):
-        return value in {"npm", "PyPI"}
+        return value in DEPENDENCY_KINDS
     if path == ("kind",):
         return value in {"host", "k8s"}
     if path == ("package_manager",):

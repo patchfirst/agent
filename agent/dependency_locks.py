@@ -9,6 +9,8 @@ MAX_PACKAGES = 20000
 NPM_NAME = re.compile(r'(?:@[a-z0-9_.~-]+/)?[a-z0-9_.~-]+', re.I)
 PYPI_NAME = re.compile(r'[a-z0-9][a-z0-9._-]*', re.I)
 VERSION = re.compile(r'[0-9][a-z0-9.!+_~-]{0,127}', re.I)
+NAMES = {'npm': NPM_NAME, 'PyPI': PYPI_NAME, 'RubyGems': PYPI_NAME}
+REGISTRIES = {'npm': {'registry.npmjs.org'}, 'PyPI': {'pypi.org', 'files.pythonhosted.org'}, 'RubyGems': {'rubygems.org'}}
 
 
 def exact(version):
@@ -21,15 +23,14 @@ def public_registry(value, eco):
         return False
     try:
         url = urlsplit(value)
-        hosts = {'registry.npmjs.org'} if eco == 'npm' else {'pypi.org', 'files.pythonhosted.org'}
-        return url.scheme == 'https' and url.hostname in hosts and not url.username and not url.password and url.port in (None, 443)
+        return url.scheme == 'https' and url.hostname in REGISTRIES.get(eco, ()) and not url.username and not url.password and url.port in (None, 443)
     except ValueError:
         return False
 
 
 def row(eco, name, version, dev=False, private=False, public=False):
-    pattern = NPM_NAME if eco == 'npm' else PYPI_NAME
-    if not isinstance(name, str) or not pattern.fullmatch(name) or (not private and not exact(version)):
+    pattern = NAMES.get(eco)
+    if not pattern or not isinstance(name, str) or not pattern.fullmatch(name) or (not private and not exact(version)):
         return None
     result = {'eco': eco, 'name': name.lower(), 'version': version if exact(version) else '0'}
     if private:
@@ -199,6 +200,39 @@ def pipfile(data):
             yield row('PyPI', name, package.get('version', '')[2:], group == 'develop', private, public)
 
 
+def gemfile_lock(text):
+    """Bundler lockfile: GEM blocks carry their remotes; GIT, PATH and plugin sources are the owner's code."""
+    # The collector appends this marker when a Bundler mirror redirects rubygems.org on the host.
+    mirrored = bool(re.search(r'^PSR-Private: mirror\r?$', text, re.M))
+    section, remotes, public = '', 0, False
+    for line in text.splitlines():
+        line = line.rstrip('\r')
+        if line and not line[0].isspace():
+            section, remotes = line.strip(), 0
+            public = section == 'GEM' and not mirrored
+            continue
+        if section not in ('GEM', 'GIT', 'PATH', 'PLUGIN SOURCE'):
+            continue
+        if line.startswith('  remote:'):
+            remotes += 1
+            public = public and public_registry(line[len('  remote:'):].strip(), 'RubyGems')
+            continue
+        # Specs are indented by four spaces, their own dependencies by six.
+        if not line.startswith('    ') or line[4:5].isspace():
+            continue
+        name, _, rest = line[4:].partition(' (')
+        if not rest.endswith(')'):
+            continue
+        # A platform gem is locked as version-platform; Bundler itself splits at the first dash.
+        version = rest[:-1].split('-', 1)[0]
+        confirmed = public and remotes > 0
+        yield row('RubyGems', name, version, private=not confirmed, public=confirmed)
+
+
+def installed_fields(text):
+    return dict(re.findall(r'^(Name|Version):[ \t]*([^\n\r]+)', re.split(r'\r?\n\r?\n', text, maxsplit=1)[0], re.M))
+
+
 def development(rows, prod, dev, graph):
     def closure(roots):
         seen, pending = set(), list(roots)
@@ -342,8 +376,14 @@ def parse(filename, text, manifest=None):
             rows = python_toml(text)
         elif name.startswith('requirements') and name.endswith('.txt'):
             rows = requirements(text, 'dev' in name.lower())
+        elif name == 'Gemfile.lock':
+            rows = gemfile_lock(text)
+        elif name.endswith('.gemspec'):
+            # The collector reduces an installed specification to these two headers on the host.
+            fields = installed_fields(text)
+            rows = [row('RubyGems', fields.get('Name'), fields.get('Version'))]
         elif name == 'METADATA':
-            fields = dict(re.findall(r'^(Name|Version):\s*([^\n\r]+)', re.split(r'\r?\n\r?\n', text, maxsplit=1)[0], re.M))
+            fields = installed_fields(text)
             # Installed names remain eligible unless private evidence was collected;
             # METADATA alone does not confirm a public package source.
             private = bool(re.search(r'^PSR-Private: (?:direct|index)$', text, re.M))
@@ -405,12 +445,17 @@ def collect(files, limit=MAX_PACKAGES, npm_registry=()):
     # A private lock identifies a package by name, independently of installed version.
     # Unpinned requirements still establish names when their primary index is private.
     private_names = {}
-    normalize = lambda name: re.sub(r'[-_.]+', '-', name).lower()
+    def normalize(eco, name):
+        return re.sub(r'[-_.]+', '-', name).lower() if eco == 'PyPI' else name.lower()
+    def installed(package):
+        basename = package['lock'].rsplit('/', 1)[-1]
+        return basename == 'METADATA' if package['eco'] == 'PyPI' else basename.endswith('.gemspec')
     for package in result:
         basename = package['lock'].rsplit('/', 1)[-1]
-        if (package['eco'] == 'PyPI' and package.get('private') and basename != 'METADATA'
+        if (package['eco'] in ('PyPI', 'RubyGems') and package.get('private') and not installed(package)
                 and not (basename.startswith('requirements') and basename.endswith('.txt'))):
-            private_names.setdefault(package['lock'].rsplit('/', 1)[0], set()).add(normalize(package['name']))
+            private_names.setdefault((package['eco'], package['lock'].rsplit('/', 1)[0]), set()).add(
+                normalize(package['eco'], package['name']))
     for path, text in files:
         name = path.rsplit('/', 1)[-1]
         if not (name.startswith('requirements') and name.endswith('.txt')):
@@ -420,14 +465,14 @@ def collect(files, limit=MAX_PACKAGES, npm_registry=()):
         indexes = re.findall(r'(?:^|\s)(?:--index-url(?:\s+|=)|-i(?:\s+|=)?)(\S+)', text)
         if indexes and not public_registry(indexes[-1], 'PyPI'):
             names = re.findall(r'^[ \t]*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~\[]|$)', text, re.M)
-            private_names.setdefault(path.rsplit('/', 1)[0], set()).update(map(normalize, names))
+            private_names.setdefault(('PyPI', path.rsplit('/', 1)[0]), set()).update(normalize('PyPI', n) for n in names)
     for package in result:
-        if package['eco'] != 'PyPI' or not package['lock'].endswith('/METADATA'):
+        if package['eco'] not in ('PyPI', 'RubyGems') or not installed(package):
             continue
-        name = normalize(package['name'])
+        name = normalize(package['eco'], package['name'])
         parent = package['lock'].rsplit('/', 1)[0]
         while parent:
-            if name in private_names.get(parent, ()):
+            if name in private_names.get((package['eco'], parent), ()):
                 package['private'] = True
                 break
             parent = parent.rsplit('/', 1)[0] if '/' in parent else ''

@@ -187,15 +187,15 @@ class Anonymizer:
 
     def dependency(self, package):
         name, eco = package['name'], package['eco']
-        pattern = dependency_locks.NPM_NAME if eco == 'npm' else dependency_locks.PYPI_NAME
-        valid = bool(pattern.fullmatch(name)) and not self.marked(name)
+        pattern = dependency_locks.NAMES.get(eco)
+        valid = bool(pattern and pattern.fullmatch(name)) and not self.marked(name)
         # Listed identities are already public, even when this installed copy
         # comes from a private source. Source proof governs clean counts and
         # registry-only names.
         version = services.public_version(package['version'])
         listed = valid and self.sendable(name, eco, package)
         named = listed and bool(version)
-        out = {'eco': eco, 'lock': self.location('lock', package['lock'], 'npm' if eco == 'npm' else 'python'),
+        out = {'eco': eco, 'lock': self.location('lock', package['lock'], services.DEPENDENCY_KINDS[eco]),
                'name': name if named else self.dependency_label(eco, name, package['version']),
                'version': version if named else ''}
         if valid and not package.get('private') and package.get('public') is True and self.public_names is not None and not listed:

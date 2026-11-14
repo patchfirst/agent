@@ -62,11 +62,11 @@ def current():
 
 
 def needed_ecosystems(inventories):
-    from services import os_metadata
+    from services import DEPENDENCY_KINDS, os_metadata
     needed = set()
     for inventory in inventories:
         needed.update(ecosystems(os_metadata(inventory.get('os', {}))))
-        needed.update(dep['eco'] for dep in inventory.get('deps', []) if dep.get('eco') in {'npm', 'PyPI'})
+        needed.update(dep['eco'] for dep in inventory.get('deps', []) if dep.get('eco') in DEPENDENCY_KINDS)
         if inventory.get('composer'):
             needed.add('Packagist')
     return needed
